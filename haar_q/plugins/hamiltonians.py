@@ -1,14 +1,14 @@
 """
 Hamiltonian utilities for quantum many-body calculations.
 
-This module provides high-level wrappers around qmp's Model and Hamiltonian
+This module provides high-level wrappers around haar_q's Model and Hamiltonian
 classes for working with wavefunctions stored in SHCI text format.
 """
 
 from pathlib import Path
 import torch
-from qmp.models.fcidump import ModelConfig, Model
-from qmp.utility.bitspack import pack_int, unpack_int
+from haar_q.models.fcidump import ModelConfig, Model
+from haar_q.utility.bitspack import pack_int, unpack_int
 
 __all__ = ["WaveFunction", "Hamiltonian"]
 
@@ -178,12 +178,12 @@ class Hamiltonian:
     """
     High-level Hamiltonian wrapper for quantum chemistry calculations.
 
-    Wraps qmp's Model class to provide convenient WaveFunction-based operations.
+    Wraps haar_q's Model class to provide convenient WaveFunction-based operations.
 
     Attributes
     ----------
     model : Model
-        The underlying qmp Model loaded from FCIDUMP file.
+        The underlying haar_q Model loaded from FCIDUMP file.
     """
 
     def __init__(self, file_name: str | Path):

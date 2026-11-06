@@ -1,5 +1,5 @@
 """
-PySCF-compatible FCI solver plugin for QMP.
+PySCF-compatible FCI solver plugin for HAAR-Q.
 
 This module exposes a :class:`Solver` that conforms to the PySCF FCI-solver
 interface::
@@ -7,7 +7,7 @@ interface::
     solver = Solver(config)
     energy, ci = solver.kernel(h1e, eri, norb, nelec)
 
-The ``config`` argument mirrors the YAML config accepted by ``qmp.__main__``::
+The ``config`` argument mirrors the YAML config accepted by ``haar_q.__main__``::
 
     config = {
         "action": {"name": "haar", "params": {}},
@@ -20,13 +20,13 @@ The ``config`` argument mirrors the YAML config accepted by ``qmp.__main__``::
         },
     }
 
-Internally the solver closely mimics :func:`qmp.__main__.main`:
+Internally the solver closely mimics :func:`haar_q.__main__.main`:
 
 1. Imports the requested algorithm and model modules.
-2. Builds a :class:`~qmp.models.pyscf.Model` from the supplied integral arrays.
+2. Builds a :class:`~haar_q.models.pyscf.Model` from the supplied integral arrays.
 3. Constructs a :class:`_PyscfRuntimeContext` that overrides
-   :meth:`~qmp.utility.context.RuntimeContext.folder` to use a temporary
-   directory and :meth:`~qmp.utility.context.RuntimeContext.create_model` to
+   :meth:`~haar_q.utility.context.RuntimeContext.folder` to use a temporary
+   directory and :meth:`~haar_q.utility.context.RuntimeContext.create_model` to
    inject the pre-built model.  All other methods — including ``setup()`` and
    ``save()`` — are inherited unchanged from :class:`RuntimeContext` and work
    via normal polymorphism.
@@ -64,7 +64,7 @@ from ..utility.model_dict import ModelProto
 
 class _CIArray(numpy.ndarray):
     """
-    A numpy array subclass that stores a QMP checkpoint dictionary.
+    A numpy array subclass that stores a HAAR-Q checkpoint dictionary.
 
     This allows the FCI solver to return a standard-looking CI wavefunction
     (the array) while still carrying the full state (network, optimizer, etc.)
@@ -84,14 +84,14 @@ class _CIArray(numpy.ndarray):
 
 class _PyscfRuntimeContext(RuntimeContext):
     """
-    A :class:`~qmp.utility.context.RuntimeContext` subclass for programmatic
+    A :class:`~haar_q.utility.context.RuntimeContext` subclass for programmatic
     (non-Hydra) use from the PySCF solver plugin.
 
     The only behavioural differences from the base class are:
 
     * :meth:`folder` returns an explicit path supplied at construction time
       instead of reading the Hydra output directory.
-    * :meth:`create_model` returns a pre-built :class:`~qmp.models.pyscf.Model`
+    * :meth:`create_model` returns a pre-built :class:`~haar_q.models.pyscf.Model`
       instead of instantiating one from the OmegaConf config.
 
     All other methods, including :meth:`~RuntimeContext.setup` and
@@ -121,7 +121,7 @@ def _to_pyscf_ci(
     data: dict[str, typing.Any], action_name: str, norb: int, nelec: int | tuple[int, int]
 ) -> numpy.ndarray | None:
     """
-    Convert QMP sampled configurations and amplitudes to a PySCF CI vector.
+    Convert HAAR-Q sampled configurations and amplitudes to a PySCF CI vector.
     """
     try:
         from pyscf.fci import cistring
@@ -158,7 +158,7 @@ def _to_pyscf_ci(
     configs_np = configs.cpu().numpy()
     psi_np = psi.cpu().numpy()
 
-    # Unpack bits: QMP order is little-endian bit-packed bytes
+    # Unpack bits: HAAR-Q order is little-endian bit-packed bytes
     bits = numpy.unpackbits(configs_np, axis=1, bitorder="little")
 
     # Extract alpha and beta occupancy (alpha=even, beta=odd bits)
@@ -187,7 +187,7 @@ def _to_pyscf_ci(
 
 def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, int]) -> dict[str, typing.Any]:
     """
-    Convert a PySCF CI vector back to a QMP checkpoint (sampled pool).
+    Convert a PySCF CI vector back to a HAAR-Q checkpoint (sampled pool).
     """
     try:
         from pyscf.fci import cistring
@@ -236,11 +236,11 @@ def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, i
 
 class Solver:
     """
-    PySCF-compatible FCI solver backed by QMP algorithms.
+    PySCF-compatible FCI solver backed by HAAR-Q algorithms.
 
     The interface mirrors that of ``pyscf.fci.direct_spin1.FCISolver``::
 
-        from qmp.plugins.pyscf import Solver
+        from haar_q.plugins.pyscf import Solver
         solver = Solver({
             "action": {"name": "haar", "params": {}},
             "network": {"name": "mlp/u1u1", "params": {}},
@@ -252,7 +252,7 @@ class Solver:
     Parameters
     ----------
     config : dict or omegaconf.DictConfig
-        Configuration in the same format as the ``qmp.__main__`` YAML config.
+        Configuration in the same format as the ``haar_q.__main__`` YAML config.
         Required top-level keys: ``action``, ``network``, ``optimizer``,
         ``common``.  The ``model`` key is ignored (the model is built
         automatically from the integral arrays passed to :meth:`kernel`).
@@ -301,8 +301,8 @@ class Solver:
             directly.
         ci0 : dict or numpy.ndarray, optional
             Initial guess or checkpoint data. If a ``dict``, it is treated as
-            the full QMP checkpoint. If a ``numpy.ndarray``, it is treated as
-            the PySCF CI vector and converted to a QMP pool.
+            the full HAAR-Q checkpoint. If a ``numpy.ndarray``, it is treated as
+            the PySCF CI vector and converted to a HAAR-Q pool.
         nuclear_repulsion : float
             Constant nuclear repulsion energy added to the Hamiltonian.
         ref_energy : float
@@ -316,7 +316,7 @@ class Solver:
             Ground-state energy after global algorithm steps.
         ci : numpy.ndarray or dict
             CI wavefunction as a numpy array. The array is an instance of
-            ``_CIArray`` which carries the full QMP checkpoint for warm-start
+            ``_CIArray`` which carries the full HAAR-Q checkpoint for warm-start
             compatibility.
         """
         # ------------------------------------------------------------------
@@ -334,8 +334,8 @@ class Solver:
         # ------------------------------------------------------------------
         # 2. Dynamic imports — mirroring __main__.py
         # ------------------------------------------------------------------
-        importlib.import_module(f"qmp.algorithms.{self.config.action.name}")
-        importlib.import_module("qmp.models.pyscf")
+        importlib.import_module(f"haar_q.algorithms.{self.config.action.name}")
+        importlib.import_module("haar_q.models.pyscf")
 
         # ------------------------------------------------------------------
         # 3. Build PySCF model from integral arrays

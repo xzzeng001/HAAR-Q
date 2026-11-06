@@ -1,10 +1,10 @@
 """
-Tests for qmp.utility.bitspack pack_int and unpack_int.
+Tests for haar_q.utility.bitspack pack_int and unpack_int.
 """
 
 import torch
 
-from qmp.utility.bitspack import pack_int, unpack_int
+from haar_q.utility.bitspack import pack_int, unpack_int
 
 
 class TestPackUnpackIntSize1:

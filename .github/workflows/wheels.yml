@@ -1,4 +1,4 @@
-name: Build wheels
+name: Build HAAR-Q wheels
 permissions:
   contents: read
 
@@ -29,10 +29,11 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/project/qmp-kit/
+      url: https://pypi.org/project/haar-q/
     permissions:
       id-token: write
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Enable after configuring PyPI Trusted Publishing for HAAR-Q.
+    if: vars.HAAR_Q_PUBLISH_PYPI == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - uses: actions/download-artifact@v8

@@ -20,19 +20,19 @@ def _scaled_angle(scale: torch.Tensor, min_magnitude: float) -> torch.Tensor:
     return 1 / (1 + min_magnitude / scale)
 
 
-# 损失函数目录:
-# log: 基础对数损失。实部为幅度对数差，虚部为相位差。注意：相位差归一化后执行了 round 以处理 2π 周期性。
-# sum_reweighted_log: 在 log 基础上，将整体损失乘以幅度之和 (s_abs + t_abs) 进行重加权。
-# sum_filtered_log: 在 log 基础上，将整体损失乘以 _scaled_angle 因子，在低幅度区域抑制梯度。
-# sum_filtered_scaled_log: 结合了 _scaled_abs (处理极小值) 和 sum_filtered_log 的过滤机制。
-# sum_reweighted_angle_log: 仅对相位部分的损失乘以幅度之和重加权，幅度部分保持 log 原样。
-# sum_filtered_angle_log: 仅对相位部分的损失进行过滤抑制，幅度部分保持 log 原样。
-# sum_filtered_angle_scaled_log: 结合 _scaled_abs 并仅对相位部分进行过滤抑制。
-# direct: 直接计算波函数之差的模长平方，不使用对数转换。
+# Loss function directory:
+# log: Squared log-magnitude and phase differences. Subtract the rounded normalized phase difference to wrap at 2*pi.
+# sum_reweighted_log: Reweight the complete log loss by the sum of magnitudes (s_abs + t_abs).
+# sum_filtered_log: Multiply the log loss by _scaled_angle to suppress gradients at small amplitudes.
+# sum_filtered_scaled_log: Combine _scaled_abs for tiny amplitudes with the filtering in sum_filtered_log.
+# sum_reweighted_angle_log: Reweight only the phase error by the sum of magnitudes; retain the log-magnitude error.
+# sum_filtered_angle_log: Filter only the phase error; retain the log-magnitude error.
+# sum_filtered_angle_scaled_log: Combine _scaled_abs with filtering applied only to the phase error.
+# direct: Compute the squared magnitude of the wavefunction difference without a logarithmic transform.
 #
-# 辅助函数:
-# _scaled_abs: 幅度映射函数。在 min_magnitude 以上为 log，以下转为线性以避免梯度爆炸。
-# _scaled_angle: 权重因子函数。根据幅度返回 0 到 1 之间的值，用于在小幅度时关闭相位优化。
+# Helper functions:
+# _scaled_abs: Map magnitudes logarithmically above min_magnitude and linearly below it to limit large gradients.
+# _scaled_angle: Return an amplitude-dependent weight between 0 and 1 to suppress phase optimization at small amplitudes.
 
 
 @torch.jit.script

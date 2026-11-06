@@ -1,5 +1,5 @@
 """
-Main entry point for the qmp command-line interface.
+Main entry point for the haar_q command-line interface.
 """
 
 import pathlib
@@ -14,7 +14,7 @@ from .utility.action_dict import action_dict
 
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
 def main(runtime_config: omegaconf.DictConfig) -> None:
-    """Execute the qmp application based on the provided configuration."""
+    """Execute the haar_q application based on the provided configuration."""
 
     # 0. Dynamic Imports
     importlib.import_module(f".algorithms.{runtime_config.action.name}", package=__package__)

@@ -1,5 +1,5 @@
 """
-Tests for qmp.hamiltonian.Hamiltonian.
+Tests for haar_q.hamiltonian.Hamiltonian.
 
 We use a 4-site 1D spinless free-fermion Hamiltonian (n_qubytes=1):
 
@@ -35,7 +35,7 @@ Selected basis states used in tests:
 import pytest
 import torch
 
-from qmp.hamiltonian import Hamiltonian
+from haar_q.hamiltonian import Hamiltonian
 
 # ---------------------------------------------------------------------------
 # Fixture

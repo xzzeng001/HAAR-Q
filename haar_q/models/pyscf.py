@@ -3,7 +3,7 @@ This file provides an interface to work with PySCF-style integral arrays.
 
 The model accepts 1-electron (h1e) and 2-electron (eri) integrals in the same
 convention used by PySCF's FCI solver, converting them to the internal Hamiltonian
-representation used by QMP.
+representation used by HAAR-Q.
 """
 
 import logging
@@ -95,7 +95,7 @@ class Model(ModelProto[ModelConfig]):
     This class handles models built from PySCF-style integral arrays (h1e and eri).
 
     The integrals are in chemist's (ij|kl) notation and are converted to the
-    internal spin-orbital Hamiltonian representation used by QMP.
+    internal spin-orbital Hamiltonian representation used by HAAR-Q.
     """
 
     network_dict: dict[str, type[NetworkConfigProto["Model"]]] = {}

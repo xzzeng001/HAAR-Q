@@ -1,5 +1,5 @@
 from pathlib import Path
-from qmp.plugins.hamiltonians import WaveFunction, Hamiltonian
+from haar_q.plugins.hamiltonians import WaveFunction, Hamiltonian
 
 
 data_dir = Path(__file__).parent

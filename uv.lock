@@ -1417,7 +1417,7 @@ wheels = [
 ]
 
 [[package]]
-name = "qmp-kit"
+name = "haar-q"
 source = { editable = "." }
 dependencies = [
     { name = "dacite" },

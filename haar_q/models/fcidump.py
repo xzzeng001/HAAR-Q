@@ -124,7 +124,7 @@ class Model(ModelProto[ModelConfig]):
         ref_energy = args.ref_energy
 
         checksum = hashlib.sha256(model_path.read_bytes()).hexdigest() + "v5"
-        cache_file = platformdirs.user_cache_path("qmp", "kclab") / checksum
+        cache_file = platformdirs.user_cache_path("haar-q", "HAAR-Q") / checksum
         if cache_file.exists():
             logging.info("Loading FCIDUMP metadata from file: %s", model_path)
             (n_orbit, n_electron, n_spin), _ = read_fcidump(model_path, headonly=True)

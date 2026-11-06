@@ -3,7 +3,7 @@ This module is used to store a dictionary that maps action names to their corres
 
 Other packages or subpackages can register their actions by adding entries to this dictionary, such as
 ```
-from qmp.utility.action_dict import action_dict
+from haar_q.utility.action_dict import action_dict
 action_dict["my_action"] = MyAction
 ```
 """

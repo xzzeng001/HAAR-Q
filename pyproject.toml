@@ -3,7 +3,7 @@ requires = ["setuptools>=80.9.0", "setuptools_scm>=9.2.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qmp-kit"
+name = "haar-q"
 dynamic = ["version"]
 dependencies = [
   "platformdirs>=4.5.1",
@@ -19,8 +19,12 @@ dependencies = [
   "pyscf>=2.12.1",
 ]
 requires-python = ">=3.12"
-authors = [{ name = "Hao Zhang", email = "hzhangxyz@outlook.com" }]
-description = "Quantum Manybody Problem"
+authors = [
+  { name = "xiongzhi zeng", email = "xzzeng@ustc.edu.cn" },
+  { name = "Hao Zhang", email = "hzhangxyz@outlook.com" },
+]
+maintainers = [{ name = "xiongzhi zeng", email = "xzzeng@ustc.edu.cn" }]
+description = "HAAR-Q: Hamiltonian-guided neural quantum states, selected CI, and variational optimization"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 keywords = ["quantum", "manybody", "quantum-chemistry", "quantum-simulation", "molecular-simulation", "algorithms", "simulation", "wave-function", "ground-state", "ansatz", "torch", "pytorch"]
@@ -45,27 +49,27 @@ pyscf = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"
-Documentation = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"
-Repository = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit.git"
-Issues = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit/issues"
+Homepage = "https://github.com/xzzeng001/HAAR-Q"
+Repository = "https://github.com/xzzeng001/HAAR-Q.git"
+Issues = "https://github.com/xzzeng001/HAAR-Q/issues"
+Publication = "https://doi.org/10.1021/acs.jctc.5c01415"
+"Original source" = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"
 
 [project.scripts]
-qmp = "qmp.__main__:main"
-qmp-kit = "qmp.__main__:main"
+haar-q = "haar_q.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["qmp*"]
+include = ["haar_q*"]
 
 [tool.setuptools.package-data]
-qmp = [
+haar_q = [
   "hamiltonian/_hamiltonian.cpp",
   "hamiltonian/_hamiltonian_cpu.cpp",
   "hamiltonian/_hamiltonian_cuda.cu",
 ]
 
 [tool.setuptools_scm]
-version_file = "qmp/_version.py"
+version_file = "haar_q/_version.py"
 version_scheme = "no-guess-dev"
 fallback_version = "0.0.0"
 

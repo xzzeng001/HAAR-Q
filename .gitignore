@@ -13,7 +13,7 @@ wheels/
 /models
 
 # Version
-/qmp/_version.py
+/haar_q/_version.py
 
 # Worktrees
 /worktree
