@@ -13,6 +13,8 @@ import omegaconf
 from ..hamiltonian import Hamiltonian
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+from ..utility.model_dict import ModelProto
+from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
 
 
 @dataclasses.dataclass
@@ -21,8 +23,8 @@ class OrbitConfig:
     Configuration for orbital optimization.
     """
 
-    # The source FCIDUMP file
-    src_fcidump: pathlib.Path
+    # Molecular geometry jobs obtain spatial integrals from the model directly.
+    src_fcidump: pathlib.Path | None
     # The output file for the optimized basis Hamiltonian
     dst_optimized: pathlib.Path
     # The reference energy, if not provided it will be 0 or read from checkpoint
@@ -35,12 +37,15 @@ class OrbitConfig:
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         # 1. Setup and data loading
-        model = context.create_model(runtime_config.model)
         data = checkpoint_data
 
         if "haar" not in data or "pool" not in data["haar"] or data["haar"]["pool"] is None:
             raise ValueError("No pool data found in checkpoint under 'haar'. Run HAAR first.")
 
+        if runtime_config.model.name == "geometry":
+            model = _load_orbital_model(context, runtime_config.model, data)
+        else:
+            model = context.create_model(runtime_config.model)
         configs, psi = data["haar"]["pool"]
         configs = configs.to(device=context.device)
         psi = psi.to(device=context.device)
@@ -56,8 +61,8 @@ class OrbitConfig:
         # U_spatial is now a (n_orbit, n_orbit) matrix for spatial orbitals only
         eigvals, U_spatial = torch.linalg.eigh(rdm_spatial)
 
-        # 3. Load original integrals (these are spatial orbital integrals from FCIDUMP)
-        (norb, nelec, nspin), e0, h1, h2 = _read_fcidump_tensors(self.src_fcidump)
+        # 3. Load spatial integrals in the basis of the saved pool.
+        (norb, nelec, nspin), e0, h1, h2 = _spatial_integrals(model, self.src_fcidump)
 
         device = context.device
         U_spatial = U_spatial.to(device=device, dtype=torch.complex128)
@@ -125,10 +130,48 @@ class OrbitConfig:
             "rdm_eigvals": eigvals.cpu(),
             "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary matrix
         }
+        if self.src_fcidump is None:
+            output_data["spatial_integrals"] = (e0, h1_opt_spatial.cpu(), h2_opt_spatial.cpu())
 
         self.dst_optimized.parent.mkdir(parents=True, exist_ok=True)
         torch.save(output_data, self.dst_optimized)
         logging.info("Successfully saved optimized basis to %s", self.dst_optimized)
+
+
+def _load_orbital_model(
+    context: RuntimeContext, config: omegaconf.DictConfig, data: dict[str, typing.Any]
+) -> ModelProto:
+    """Resume in the saved orbital basis when the pool came from an orbital SCI cycle."""
+    saved_path = data.get("haar", {}).get("model_path")
+    if saved_path is not None:
+        path = pathlib.Path(saved_path)
+        if path.is_file():
+            logging.info("Loading the saved orbital basis from %s", path)
+            return OptimizedModel(OptimizedModelConfig(model_path=path))
+        if config.name == "geometry":
+            raise FileNotFoundError(f"The checkpoint's orbital basis is required for this geometry job: {path}")
+        logging.warning("Saved model path %s not found. Falling back to initial config.", path)
+    return context.create_model(config)
+
+
+def _spatial_integrals(
+    model: ModelProto, src_fcidump: pathlib.Path | None
+) -> tuple[tuple[int, int, int], float, torch.Tensor, torch.Tensor]:
+    """Fetch the one- and two-body coefficients in creation-creation-annihilation-annihilation order."""
+    if src_fcidump is not None:
+        return _read_fcidump_tensors(src_fcidump)
+    if isinstance(model, OptimizedModel):
+        if model.spatial_integrals is None:
+            raise ValueError("The saved orbital basis lacks spatial integrals. Supply its matching FCIDUMP.")
+        e0, h1, h2 = model.spatial_integrals
+        return (model.n_qubits // 2, model.n_electrons, model.n_spins), e0, h1, h2
+    from ..models.geometry import Model as GeometryModel
+
+    if isinstance(model, GeometryModel):
+        mo = model.integrals
+        h2 = torch.as_tensor(mo.eri).permute(0, 2, 3, 1) / 2
+        return (mo.n_orbit, mo.n_electron, mo.n_spin), mo.nuclear_repulsion, torch.as_tensor(mo.h1e), h2
+    raise ValueError("Orbital optimization requires a geometry model or matching FCIDUMP integrals.")
 
 
 def _read_fcidump_tensors(

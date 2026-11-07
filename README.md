@@ -15,7 +15,7 @@ networks, and CPU/CUDA Hamiltonian operations.
 Many-electron calculations face a rapidly growing configuration space. HAAR-Q
 combines autoregressive neural-wavefunction sampling with Hamiltonian connectivity
 to identify configurations for a tractable calculation. Its model interfaces
-support molecular inputs such as FCIDUMP and [OpenFermion][openfermion-url] data,
+support molecular coordinates, FCIDUMP and [OpenFermion][openfermion-url] data,
 as well as lattice models such as Hubbard and Ising systems.
 
 The project builds on the HAAR-SCI research reported in the *Journal of Chemical
@@ -52,8 +52,8 @@ model, network and optimizer it needs.
 | `haar` | Expands a selected CI space, computes Ritz states with Lanczos, and fits the network for the next cycle. | A model and a network with unique sampling; the checkpoint stores the pool and requested Ritz states |
 | `guide` | Trains a separate sampling network from local-energy fluctuations alongside the wavefunction. | The method creates a second network using the selected ansatz. |
 | `pretrain` | Fits the network to known wavefunction amplitudes. | A Torch file containing packed configurations and their matching amplitudes as a pair of tensors |
-| `orbit` | Diagonalizes the spatial one-particle density matrix and writes a Hamiltonian in the natural-orbital basis. | A HAAR-SCI pool and its matching FCIDUMP |
-| `haar_with_orbit` | Alternates orbital rotation with selected-space Lanczos and neural fitting. | A matching molecular FCIDUMP; each cycle saves an optimized-basis file |
+| `orbit` | Diagonalizes the spatial one-particle density matrix and writes a Hamiltonian in the natural-orbital basis. | A HAAR-SCI pool and the corresponding geometry or matching FCIDUMP |
+| `haar_with_orbit` | Alternates orbital rotation with selected-space Lanczos and neural fitting. | A molecular geometry or matching FCIDUMP. Each cycle saves an optimized-basis file. |
 | `pert` | Estimates a second-order contribution from a single batch of external configurations connected to a saved pool. | A HAAR-SCI pool; the logged second-order contribution is an energy correction |
 | `chop_imag` | Ranks and removes configurations in batches and records energy against retained pool size. | A current HAAR-SCI or legacy `imag` pool in `common.parent_path` |
 
@@ -68,7 +68,7 @@ diagonal elements. The following choices are available for the sampling network.
 
 | Model input | Compatible network selectors | Physical constraint |
 | --- | --- | --- |
-| Molecular `fcidump`, `openfermion`, `optimized_basis` | `mlp/u1u1`, `transformers/u1u1`, `mlp/u1`, `transformers/u1` | `u1u1` fixes the two spin populations separately; `u1` fixes the total electron count. The OpenFermion spin-resolved implementation assumes equal spin populations. |
+| Molecular `fcidump`, `geometry`, `openfermion`, `optimized_basis` | `mlp/u1u1`, `transformers/u1u1`, `mlp/u1`, `transformers/u1` | `u1u1` fixes the two spin populations separately; `u1` fixes the total electron count. The OpenFermion spin-resolved implementation assumes equal spin populations. |
 | Open-boundary `hubbard` lattice | The four molecular selectors, plus `mps` | Hopping, on-site interaction and chemical potential; the MPS samples without an electron-number constraint. |
 | Open-boundary `ising` spin lattice | `mlp/0`, `transformers/0`, `mlp/u1`, `transformers/u1`, `mps` | `/0` allows all spin configurations. The `/u1` options select the fixed half-filled sector. Choose a sector preserved by your Hamiltonian. |
 
@@ -83,8 +83,9 @@ It accepts a resolved configuration with explicit component sections, as
 printed by `python -m haar_q -i input.yaml method=haar --show-input`.
 It can return a PySCF-shaped CI array with warm-start data. The underlying
 `pyscf` model receives NumPy arrays through Python. For a molecular YAML run,
-use an FCIDUMP, an OpenFermion MolecularData file, or a saved optimized-basis
-file. `haar_q.plugins.hamiltonians` exposes wavefunction text I/O and the
+select `system=geometry` to compute integrals from coordinates, or load an
+FCIDUMP, OpenFermion MolecularData or optimized-basis file.
+`haar_q.plugins.hamiltonians` exposes wavefunction text I/O and the
 Hamiltonian operations for standalone analysis.
 
 ## Authorship and Provenance
@@ -214,7 +215,7 @@ English comments for its parameters.
 | Selector | Choices | Parameter reference |
 | --- | --- | --- |
 | `method` | `vmc`, `haar`, `guide`, `pretrain`, `pert`, `chop_imag`, `orbit`, `haar_with_orbit` | [Calculation methods](haar_q/conf/method) |
-| `system` | `fcidump`, `hubbard`, `ising`, `openfermion`, `optimized_basis` | [Hamiltonians and lattice couplings](haar_q/conf/system) |
+| `system` | `fcidump`, `geometry`, `hubbard`, `ising`, `openfermion`, `optimized_basis` | [Hamiltonians and lattice couplings](haar_q/conf/system) |
 | `ansatz` | `mlp`, `transformers`, `mps` | [Network architectures](haar_q/conf/ansatz) |
 | `optim` | `adam`, `lbfgs` | [Optimizers](haar_q/conf/optim) |
 
@@ -259,7 +260,8 @@ python -m haar_q -i input.yaml method=pert common.parent_path=outputs/sci-exampl
 
 For supervised training, select `method=pretrain` and supply `files.dataset`.
 For natural orbitals, select `method=orbit`, supply the SCI checkpoint and
-matching `files.fcidump`, and choose a destination in `files.orbital_output`.
+its corresponding geometry or matching `files.fcidump`, and choose a
+destination in `files.orbital_output`.
 To use the rotated Hamiltonian, select `system=optimized_basis` and set
 `files.optimized_basis` to that output file.
 
@@ -267,6 +269,69 @@ Existing explicit YAML jobs with `action`, `model`, `network` and `optimizer`
 sections still run, including the [compact SCI example](examples/h2/sci.yaml).
 Use the selectors with the new standard input. Use existing parameter names
 when overriding keys in older files.
+
+#### Molecular coordinates with PySCF
+
+Choose `- system: geometry` in the standard input to compute molecular
+integrals directly from Cartesian coordinates. The supplied geometry is
+neutral H₂ at 0.74 Å in STO-3G. Edit the `geometry` section for your molecule.
+
+```yaml
+geometry:
+  atoms: |
+    H  0.0  0.0  0.0
+    H  0.0  0.0  0.74
+  xyz_file: null
+  unit: Angstrom
+  basis: sto-3g
+  charge: 0
+  spin: 0
+  ref_energy: null
+```
+
+The same coordinates can be used for either calculation from PowerShell.
+
+```powershell
+python -m haar_q -i input.yaml system=geometry method=vmc
+python -m haar_q -i input.yaml system=geometry method=haar
+```
+
+For an XYZ file, set `geometry.xyz_file` to its path relative to the YAML
+file, for example `geometry.xyz_file=molecules/H2.xyz`. The file supplies
+one frame with an atom count, a comment line (which may be blank), and one
+element and three coordinates per atom. The file takes precedence over
+`geometry.atoms`. Set `geometry.unit` to `Angstrom` or `Bohr` for either
+input. `geometry.charge` is the total charge and `geometry.spin` is
+`N_alpha - N_beta` (0 for a singlet, 1 for a doublet, 2 for a triplet).
+[PySCF molecular inputs](https://pyscf.org/user/gto.html)
+
+HAAR-Q runs restricted Hartree–Fock (RHF for spin zero, ROHF for open shells).
+It transforms the one-electron core Hamiltonian and two-electron Coulomb
+integrals to the converged spatial molecular orbitals and includes the
+nuclear repulsion once in the total Hamiltonian. All molecular orbitals
+are included. Use an all-electron basis for the atoms in the calculation.
+The SCF total energy supplies the default reporting reference.
+Set `geometry.ref_energy` to compare against a known total energy for the
+same geometry and basis. `OUTCAR` records the SCF and nuclear repulsion
+energies in hartree. The SCF iteration limit and tolerance are listed in
+the [geometry parameter reference](haar_q/conf/system/geometry.yaml).
+[PySCF integral conventions](https://pyscf.org/quickstart.html)
+
+For the H₂ coordinates above, RHF gives −1.1167593074 hartree. To check the
+integrals against exact diagonalization in STO-3G, include all four
+determinants with one alpha and one beta electron and run three
+Lanczos steps beyond the initial vector.
+
+```powershell
+python -m haar_q -i input.yaml system=geometry method=haar sampling_control.seed_count=4 options.method.haar.krylov_extend_count=0 options.method.haar.krylov_iteration=3 common.max_relative_step=1
+```
+
+The `E_RITZ` column in `OSZICAR` gives −1.1372838345 hartree, including
+nuclear repulsion. The separate `E` column reports the fitted network energy.
+
+Start a fresh run when changing the molecule, basis, charge or spin.
+When resuming a calculation or using its SCI pool, use the same orbital
+basis and retain any optimized-basis files referenced by the checkpoint.
 
 #### Hamiltonian-guided VMC
 

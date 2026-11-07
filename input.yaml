@@ -2,7 +2,7 @@
 # Edit the four choices below, or override any choice on the command line.
 defaults:
   - method: vmc        # vmc, haar, guide, pretrain, pert, chop_imag, orbit, haar_with_orbit
-  - system: fcidump    # fcidump, hubbard, ising, openfermion, optimized_basis
+  - system: fcidump    # fcidump, geometry (PySCF), hubbard, ising, openfermion, optimized_basis
   - ansatz: mlp        # mlp, transformers, mps (lattice models only)
   - optim: adam        # adam, lbfgs
   - _self_             # The settings in this file take precedence over the module defaults.
@@ -23,6 +23,17 @@ files:                      # Relative data paths start at this YAML file.
   optimized_basis: null     # Tensor file from an orbital calculation for system=optimized_basis.
   dataset: null             # Torch (packed configurations, amplitudes) pair for method=pretrain.
   orbital_output: outputs/H2-natural-orbitals.pt  # Destination of the orbit post-processing action.
+
+geometry:                     # Used by system=geometry. PySCF computes the molecular-orbital integrals.
+  atoms: |                    # Element and Cartesian x, y, z, one atom per line.
+    H  0.0  0.0  0.0
+    H  0.0  0.0  0.74
+  xyz_file: null              # Optional single-frame XYZ file relative to this YAML. Overrides atoms when set.
+  unit: Angstrom              # Angstrom or Bohr, also applied to an XYZ file.
+  basis: sto-3g               # Orbital basis on all atoms.
+  charge: 0                   # Total molecular charge.
+  spin: 0                     # N_alpha - N_beta (2S): 0 for a singlet, 1 for a doublet.
+  ref_energy: null            # Optional reference total energy in hartree. Null uses the converged HF energy.
 
 symmetry: ${default_symmetry}      # Model default: u1u1 for electronic systems, 0 for Ising.
 sampling_control:

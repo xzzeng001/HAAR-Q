@@ -1,5 +1,18 @@
 # HAAR-Q changelog
 
+## 0.4.0
+
+0.3.0 → 0.4.0 (MINOR). Molecular calculations gain a coordinate-based input.
+
+- Select `system=geometry` to supply Cartesian coordinates directly in YAML
+  or read a single-frame XYZ file. Specify the orbital basis, units, total
+  charge and spin in the same input.
+- PySCF computes RHF or ROHF molecular orbitals and the one- and two-electron
+  integrals for the HAAR-Q Hamiltonian. Reported total energies include
+  nuclear repulsion. The default reference is the converged SCF total energy.
+- VMC, HAAR-SCI and orbital rotation can use the generated integrals. See the
+  [coordinate input example](README.md#molecular-coordinates-with-pyscf).
+
 ## 0.3.0
 
 0.2.0 → 0.3.0 (MINOR). The standard input gains independent selectors for

@@ -96,7 +96,11 @@ def calculation_report(folder: Path, config: DictConfig, device: str) -> Iterato
             report.line(f"Model {config.model.name}  |  Network {network}  |  Device {device}")
             report.line(f"Output directory  {folder}")
             if history is not None:
-                unit = "Hartree (Eh)" if config.model.name in {"fcidump", "pyscf"} else "Hamiltonian input units"
+                unit = (
+                    "Hartree (Eh)"
+                    if config.model.name in {"fcidump", "geometry", "pyscf"}
+                    else "Hamiltonian input units"
+                )
                 report.line(f"Energies in {unit}")
                 energy_note = (
                     "E is the fitted network energy in the selected basis. E_RITZ is the lowest Lanczos target."

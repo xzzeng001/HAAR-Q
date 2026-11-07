@@ -1,0 +1,19 @@
+# @package _global_
+model:
+  name: geometry
+  params: ${options.system.geometry}
+default_symmetry: u1u1
+orbital_integral_file: null  # Orbital methods use the integrals built from these coordinates.
+
+options:
+  system:
+    geometry:
+      atoms: ${oc.select:geometry.atoms,null}             # One element symbol and three Cartesian coordinates per row.
+      xyz_file: ${oc.select:geometry.xyz_file,null}       # A single-frame XYZ file takes precedence over inline atoms.
+      basis: ${oc.select:geometry.basis,sto-3g}           # PySCF orbital basis, used on every atom.
+      unit: ${oc.select:geometry.unit,Angstrom}           # Coordinate unit for both input formats, Angstrom or Bohr.
+      charge: ${oc.select:geometry.charge,0}              # Total molecular charge in elementary-charge units.
+      spin: ${oc.select:geometry.spin,0}                  # Number of alpha electrons minus number of beta electrons.
+      ref_energy: ${oc.select:geometry.ref_energy,null}   # Optional total-energy reference in hartree. Null uses SCF.
+      scf_conv_tol: 1.0e-9                               # SCF energy convergence tolerance in hartree.
+      scf_max_cycle: 50                                  # Maximum number of SCF iterations.

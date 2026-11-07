@@ -53,6 +53,7 @@ class Model(ModelProto[ModelConfig]):
 
         # Store the unitary transformation matrix for future use
         self.orbit_unitary: torch.Tensor | None = data.get("orbit_unitary")
+        self.spatial_integrals: tuple[float, torch.Tensor, torch.Tensor] | None = data.get("spatial_integrals")
 
         logging.info("Hamiltonian loaded successfully")
         logging.info(

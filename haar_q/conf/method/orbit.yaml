@@ -9,6 +9,6 @@ action:
 options:
   method:
     orbit:
-      src_fcidump: ${files.fcidump}                      # Original molecular integrals in the orbital basis of the selected pool.
+      src_fcidump: ${oc.select:orbital_integral_file,${oc.select:files.fcidump}}  # File-backed source, or null for PySCF geometry.
       dst_optimized: ${files.orbital_output}             # Output model file. A subsequent run can load it through the optimized_basis system.
       ref_energy: null                                   # Optional energy reference in hartree. Null copies the reference from the source model.

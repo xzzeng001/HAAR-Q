@@ -74,6 +74,7 @@ def test_switch_in_one_input_preserves_shared_and_per_method_settings(
     ("overrides", "model", "network", "optimizer"),
     [
         ([], "fcidump", "mlp/u1u1", "Adam"),
+        (["system=geometry"], "geometry", "mlp/u1u1", "Adam"),
         (["system=ising", "ansatz=transformers"], "ising", "transformers/0", "Adam"),
         (["system=hubbard", "ansatz=mps"], "hubbard", "mps", "Adam"),
         (["optim=lbfgs"], "fcidump", "mlp/u1u1", "LBFGS"),
@@ -93,6 +94,18 @@ def test_component_selectors(
         assert job.action.params.unique_seeds is False
     if optimizer == "LBFGS":
         assert "betas" not in job.optimizer.params
+
+
+def test_geometry_preview_resolves_xyz_relative_to_yaml_and_omits_integral_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    source = tmp_path / "molecule.yaml"
+    source.write_bytes(TEMPLATE.read_bytes())
+    job = preview(monkeypatch, capsys, source, "system=geometry", "method=orbit", "geometry.xyz_file=data/H2.xyz")
+    assert Path(job.model.params.xyz_file) == tmp_path / "data/H2.xyz"
+    assert job.model.params.atoms is None
+    assert job.action.params.src_fcidump is None
+    assert job.model.params.ref_energy is None
 
 
 @pytest.mark.parametrize(

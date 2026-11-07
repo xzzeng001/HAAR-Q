@@ -46,9 +46,11 @@ def validate_selection(config: DictConfig) -> None:
             raise ValueError(f"system={system} requires files.{_MODEL_FILES[system]} to point to a model file.")
 
     if method in {"orbit", "haar_with_orbit"}:
-        if system not in _MODEL_FILES:
+        if system == "geometry" and params.get("src_fcidump"):
+            raise ValueError(f"method={method} uses the geometry model integrals. Leave src_fcidump null.")
+        if system != "geometry" and system not in _MODEL_FILES:
             raise ValueError(f"method={method} requires a molecular system and matching FCIDUMP integrals.")
-        if not params.get("src_fcidump"):
+        if system != "geometry" and not params.get("src_fcidump"):
             raise ValueError(f"method={method} requires files.fcidump to point to the matching molecular integrals.")
     if method == "orbit" and not params.get("dst_optimized"):
         raise ValueError("method=orbit requires files.orbital_output for the rotated Hamiltonian.")

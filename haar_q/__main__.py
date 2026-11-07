@@ -20,6 +20,7 @@ def _resolve_input_paths(runtime_config: DictConfig, input_dir: Path) -> None:
     """Anchor user-supplied files at the explicit YAML, even if Hydra changes directory."""
     for key in (
         "model.params.model_path",
+        "model.params.xyz_file",
         "common.parent_path",
         "action.params.dataset_path",
         "action.params.src_fcidump",
@@ -42,6 +43,8 @@ def _prepare_input(config: DictConfig, input_dir: Path | None, *, check: bool = 
                 for key in config.calculation_sections
             }
         )
+        if config.model.name == "geometry" and config.model.params.get("xyz_file"):
+            config.model.params.atoms = None
         if input_dir is not None:
             _resolve_input_paths(config, input_dir)
         if check:

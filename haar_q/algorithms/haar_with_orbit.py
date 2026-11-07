@@ -10,7 +10,7 @@ import pathlib
 import omegaconf
 import torch
 import torch.utils.tensorboard
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment  # type: ignore[import-untyped]
 from ..utility import losses
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
@@ -24,7 +24,7 @@ from .haar import (
     _sampling_from_last_iteration,
     _merge_pool_from_neural_network_and_pool_from_last_iteration,
 )
-from .orbit import NaturalOrbitCalculator, _read_fcidump_tensors
+from .orbit import NaturalOrbitCalculator, _load_orbital_model, _spatial_integrals
 from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
 
 
@@ -34,8 +34,8 @@ class HaarWithOrbitConfig:
     The two-step optimization process with iterative orbital optimization.
     """
 
-    # The source FCIDUMP file for orbital optimization
-    src_fcidump: pathlib.Path
+    # Geometry jobs rotate spatial integrals supplied by the model.
+    src_fcidump: pathlib.Path | None
 
     # --- HAAR Config Params (copied from haar.py) ---
     sampling_count_from_neural_network: int = 1024
@@ -95,7 +95,7 @@ class HaarWithOrbitConfig:
         U_spatial = permuted_U
 
         # 4. Load and Transform SPATIAL Integrals
-        (norb, nelec, nspin), e0, h1, h2 = _read_fcidump_tensors(self.src_fcidump)
+        (norb, nelec, nspin), e0, h1, h2 = _spatial_integrals(model, self.src_fcidump)
 
         device = context.device
         U_spatial = U_spatial.to(device=device, dtype=torch.complex128)
@@ -154,10 +154,12 @@ class HaarWithOrbitConfig:
             "n_qubits": 2 * norb,
             "n_electrons": nelec,
             "n_spins": nspin,
-            "ref_energy": 0.0,
+            "ref_energy": model.ref_energy if self.src_fcidump is None else 0.0,
             "rdm_eigvals": eigvals.cpu(),
             "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary (block-diagonal)
         }
+        if self.src_fcidump is None:
+            output_data["spatial_integrals"] = (e0, h1_opt_spatial.cpu(), h2_opt_spatial.cpu())
 
         optimized_path = context.folder() / f"optimized_basis_step_{step}.pt"
         torch.save(output_data, optimized_path)
@@ -174,19 +176,7 @@ class HaarWithOrbitConfig:
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         data = checkpoint_data
-        model: ModelProto[typing.Any]
-
-        # Determine which model to load (initial or resumed)
-        if "haar" in data and "model_path" in data["haar"]:
-            path = pathlib.Path(data["haar"]["model_path"])
-            if path.exists():
-                logging.info("Resuming with optimized model from %s", path)
-                model = OptimizedModel(OptimizedModelConfig(model_path=path))
-            else:
-                logging.warning("Saved model path %s not found. Falling back to initial config.", path)
-                model = context.create_model(runtime_config.model)
-        else:
-            model = context.create_model(runtime_config.model)
+        model = _load_orbital_model(context, runtime_config.model, data)
 
         network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
 

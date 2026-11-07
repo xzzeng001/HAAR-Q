@@ -9,7 +9,7 @@ action:
 options:
   method:
     haar_with_orbit:
-      src_fcidump: ${files.fcidump}                      # Original molecular integrals in the orbital basis of the selected pool.
+      src_fcidump: ${oc.select:orbital_integral_file,${oc.select:files.fcidump}}  # File-backed source, or null for PySCF geometry.
       network_seed_count: ${sampling_control.seed_count} # Unique configurations drawn from the network per cycle.
       previous_seed_count: ${sampling_control.seed_count} # Maximum number drawn from the previous pool, weighted by squared amplitude.
       krylov_extend_count: 2                             # Hamiltonian neighbors per expansion. Zero fixes the basis. -1 selects the library heuristic.
