@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=80.9.0", "setuptools_scm>=9.2.2"]
+requires = ["setuptools>=80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -68,10 +68,8 @@ haar_q = [
   "hamiltonian/_hamiltonian_cuda.cu",
 ]
 
-[tool.setuptools_scm]
-version_file = "haar_q/_version.py"
-version_scheme = "no-guess-dev"
-fallback_version = "0.0.0"
+[tool.setuptools.dynamic]
+version = { attr = "haar_q.version.__version__" }
 
 [tool.ruff]
 line-length = 120

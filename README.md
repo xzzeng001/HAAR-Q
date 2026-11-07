@@ -94,17 +94,67 @@ command-line launcher in the active Python environment (`haar-q.exe` on Windows)
 
 ### Usage
 
-The application is now configured via a `config.yaml` file located in the working directory. It uses [Hydra][hydra-url] for configuration management.
-
-From the directory containing your `config.yaml`, run:
+Pass a YAML input file to the Python module or the installed command.
+For a first CPU calculation, run the two-orbital H₂ example from the project root.
 
 ```bash
-# Using the installed script
-haar-q
-
-# Or using the Python module
-python -m haar_q
+cd examples/h2
+python -m haar_q -i input.yaml
 ```
+
+This runs two Hamiltonian-guided VMC cycles. Each cycle starts with two sampled
+configurations, targets four after expansion, and performs ten Adam updates.
+The reference energy for the bundled integrals is −1.427525196849 hartree,
+including the constant term. A short run is sufficient to inspect the workflow.
+
+```bash
+python -m haar_q -i sci.yaml                              # Run HAAR-SCI
+python -m haar_q -i input.yaml common.max_relative_step=20 # Change the number of VMC cycles
+python -m haar_q -i input.yaml --cfg job                  # Inspect the configuration
+python -m haar_q --version
+```
+
+`haar-q -i input.yaml` uses the same entry point. Paths to the FCIDUMP in
+explicit inputs are relative to the YAML file, so you can launch from another
+directory, for example with `python -m haar_q -i examples/h2/input.yaml`.
+Existing jobs using a working-directory `config.yaml` or Hydra's
+`--config-name` option still work.
+
+#### Running from Windows PowerShell with WSL
+
+If HAAR-Q is installed in the Ubuntu virtual environment `~/.venvs/haar-q`,
+open PowerShell in the checkout. The following function selects that Linux
+Python for the current PowerShell session. WSL inherits the working directory
+when the checkout is on a mounted Windows drive.
+
+```powershell
+$HaarPython = (wsl.exe -d Ubuntu --exec printenv HOME).Trim() + '/.venvs/haar-q/bin/python'
+function python { wsl.exe -d Ubuntu --exec $HaarPython @args }
+Set-Location examples/h2
+python -m haar_q -i input.yaml
+```
+
+### Reading a calculation
+
+The terminal prints the output directory and one progress row per completed
+outer cycle. The bundled examples write under `outputs/vmc/` or `outputs/haar/`
+in the launch directory. Each invocation uses its own timestamped directory.
+
+| Output | Contents |
+| --- | --- |
+| `OSZICAR` | Compact convergence history for VMC and HAAR-SCI. Use this file to follow cycle energies and configuration counts. |
+| `OUTCAR` | Human-readable run information, settings, detailed iteration logs and diagnostics. |
+| `data.pth` | Latest checkpoint with the network, optimizer, and progress. |
+| `events.out.tfevents.*` | TensorBoard metrics, including VMC energies for individual local optimization steps. |
+
+For guided VMC, the cycle energy is the last energy returned by the local
+optimizer on that cycle's expanded basis. With Adam, this is evaluated just
+before the last update. For HAAR-SCI, the fitted network energy and the lowest
+Lanczos target energy are reported separately. The energy change compares
+successive cycles within the same invocation. Both molecular examples use
+hartree. The two text files follow the short-history and detailed-report
+conventions of [VASP OSZICAR](https://vasp.at/wiki/OSZICAR) and
+[VASP OUTCAR](https://vasp.at/wiki/OUTCAR).
 
 #### Configuration Structure
 
@@ -264,7 +314,9 @@ python -m pytest tests/vmc_test.py
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+See the [contribution guide](CONTRIBUTING.md) for development and validation.
+The [version policy](docs/versioning.md) defines how each delivery is numbered
+and pushed to GitHub. The [changelog](CHANGELOG.md) records the changes in each release.
 
 ## License
 

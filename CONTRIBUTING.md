@@ -59,6 +59,10 @@ configuration; distinguish these checks from larger-system benchmarks.
 
 ## Release Packaging
 
+Follow the [version and delivery policy](docs/versioning.md) for every
+user-facing update. Record the version transition in [CHANGELOG.md](CHANGELOG.md)
+and push the verified commit and release tag to the project's GitHub repository.
+
 The wheel workflow builds HAAR-Q packages. PyPI publication requires configuring
 Trusted Publishing for the new distribution and explicitly setting the repository
 variable `HAAR_Q_PUBLISH_PYPI` to `true`. A local rename or wheel build does not

@@ -12,6 +12,9 @@ wheels/
 # Models
 /models
 
+# Calculation output directories
+outputs/
+
 # Version
 /haar_q/_version.py
 

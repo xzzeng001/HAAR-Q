@@ -7,6 +7,8 @@ import logging
 import typing
 import pathlib
 import dataclasses
+from collections.abc import Iterator
+from contextlib import contextmanager
 import torch
 import dacite
 import omegaconf
@@ -14,6 +16,7 @@ from hydra.core.hydra_config import HydraConfig
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
+from .reporting import CycleResult, RunReport, calculation_report
 
 
 DACITE_CAST = [pathlib.Path, torch.device, tuple]
@@ -41,6 +44,7 @@ class RuntimeContext:
     max_relative_step: int | None = None
 
     def __post_init__(self) -> None:
+        self._report: RunReport | None = None
         if isinstance(self.dtype, str):
             match self.dtype:
                 case "bfloat16":
@@ -61,6 +65,16 @@ class RuntimeContext:
         Get the folder for storing logs.
         """
         return pathlib.Path(HydraConfig.get().runtime.output_dir)
+
+    @contextmanager
+    def reporting(self, config: omegaconf.DictConfig) -> Iterator[None]:
+        """Enable run files and progress output for this command-line calculation."""
+        with calculation_report(self.folder(), config, str(self.device)) as report:
+            self._report = report
+            try:
+                yield
+            finally:
+                self._report = None
 
     def setup(self) -> dict[str, typing.Any]:
         """
@@ -100,7 +114,7 @@ class RuntimeContext:
         logging.info("The checkpoints will be saved every %d steps", self.checkpoint_interval)
         return data
 
-    def save(self, data: typing.Any, step: int) -> None:
+    def save(self, data: typing.Any, step: int, *, result: CycleResult | None = None) -> None:
         """
         Save data to checkpoint.
         """
@@ -119,6 +133,8 @@ class RuntimeContext:
             temp_data_path.replace(data_path)
         else:
             local_data_path.replace(data_path)
+        if self._report is not None:
+            self._report.checkpoint(step, result)
         if self.max_relative_step is not None:
             self.max_absolute_step = step + self.max_relative_step - 1
             self.max_relative_step = None

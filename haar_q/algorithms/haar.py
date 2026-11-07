@@ -8,12 +8,13 @@ import typing
 import dataclasses
 import functools
 import omegaconf
-import scipy
+import scipy  # type: ignore[import-untyped]
 import torch
 import torch.utils.tensorboard
 from ..utility import losses
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+from ..utility.reporting import CycleResult
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
 
@@ -423,7 +424,8 @@ class HaarConfig:
                 configs_from_last_iteration,
                 psi_from_last_iteration,
             )
-            logging.info("Sampling completed, unique configurations count: %d", len(configs))
+            seeds = len(configs)
+            logging.info("Sampling completed, unique configurations count: %d", seeds)
 
             logging.info("Computing the target for local optimization")
             target_energy: torch.Tensor
@@ -581,7 +583,8 @@ class HaarConfig:
             data["haar"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            context.save(data, data["haar"]["global"])
+            result = CycleResult(seeds, len(configs), final_energy.item(), target_energy.item())
+            context.save(data, data["haar"]["global"], result=result)
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

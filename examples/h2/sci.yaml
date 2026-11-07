@@ -1,0 +1,35 @@
+common:
+  device: cpu
+  dtype: float64
+  random_seed: 2333
+  max_relative_step: 2
+
+model:
+  name: fcidump
+  params:
+    model_path: ../hamiltonians/H2.FCIDUMP
+    # FCI ground-state energy for these integrals including the constant term, in hartree.
+    ref_energy: -1.4275251968493827
+
+network:
+  name: mlp/u1u1
+  params:
+    hidden: [16]
+
+optimizer:
+  name: Adam
+  params:
+    lr: 0.01
+
+action:
+  name: haar
+  params:
+    sampling_count_from_neural_network: 2
+    sampling_count_from_last_iteration: 2
+    krylov_extend_count: 2
+    krylov_iteration: 1
+    local_step: 10
+
+hydra:
+  run:
+    dir: outputs/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

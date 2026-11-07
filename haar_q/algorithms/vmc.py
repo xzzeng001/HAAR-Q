@@ -10,6 +10,7 @@ import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+from ..utility.reporting import CycleResult
 
 
 def _projected_energy_loss(psi: torch.Tensor, hpsi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -129,7 +130,7 @@ class VmcConfig:
             writer.add_scalar("vmc/configs/sampled", len(configs_i), data["vmc"]["global"])  # type: ignore[no-untyped-call]
             writer.add_scalar("vmc/configs/expanded", len(configs_dst), data["vmc"]["global"])  # type: ignore[no-untyped-call]
 
-            @torch.enable_grad()
+            @torch.enable_grad()  # type: ignore[no-untyped-call]
             def closure() -> torch.Tensor:
                 # Optimizing energy
                 optimizer.zero_grad()
@@ -175,7 +176,8 @@ class VmcConfig:
             data["vmc"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            context.save(data, data["vmc"]["global"])
+            result = CycleResult(len(configs_i), len(configs_dst), energy.item())
+            context.save(data, data["vmc"]["global"], result=result)
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

@@ -43,11 +43,11 @@ def test_projected_gradient_matches_dense_rayleigh_quotient(real_parameters: boo
 
     hpsi = _hamiltonian() @ psi.detach()
     energy, loss = vmc._projected_energy_loss(psi, hpsi)
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]
 
     reference_energy = (reference_psi.conj() @ _hamiltonian() @ reference_psi).real
     reference_energy = reference_energy / reference_psi.abs().square().sum()
-    reference_energy.backward()
+    reference_energy.backward()  # type: ignore[no-untyped-call]
 
     torch.testing.assert_close(energy, reference_energy.detach(), rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(parameters.grad, reference_parameters.grad, rtol=1e-11, atol=1e-12)
@@ -139,6 +139,7 @@ class _Context:
         self.network = network
         self.cycles = cycles
         self.saved: list[tuple[dict[str, typing.Any], int]] = []
+        self.summaries: list[vmc.CycleResult] = []
         self.optimizer: torch.optim.Optimizer | None = None
 
     def create_model(self, config: typing.Any) -> _Model:
@@ -160,8 +161,9 @@ class _Context:
     def folder(self) -> pathlib.Path:
         return pathlib.Path("unused-test-log-directory")
 
-    def save(self, data: dict[str, typing.Any], step: int) -> None:
+    def save(self, data: dict[str, typing.Any], step: int, *, result: vmc.CycleResult) -> None:
         self.saved.append((copy.deepcopy(data), step))
+        self.summaries.append(result)
         if len(self.saved) == self.cycles:
             raise _Finished
 
@@ -188,7 +190,7 @@ def _expected_sgd_step(support: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     psi = amplitudes[support]
     matrix = _hamiltonian()[support][:, support]
     energy = (psi.conj() @ matrix @ psi).real / psi.abs().square().sum()
-    energy.backward()
+    energy.backward()  # type: ignore[no-untyped-call]
     assert amplitudes.grad is not None
     return amplitudes.detach() - 0.05 * amplitudes.grad, energy.detach()
 
@@ -204,6 +206,7 @@ def test_guided_step_optimizes_expanded_deduplicated_space(monkeypatch: pytest.M
     assert context.network.amplitude[2] != _amplitudes()[2]
     assert context.network.amplitude[3] == _amplitudes()[3]
     assert writer.values["vmc/energy"][0] == pytest.approx(expected_energy.item(), rel=1e-12)
+    assert context.summaries == [vmc.CycleResult(2, 3, writer.values["vmc/energy"][0])]
     assert len(context.model.expansion_calls) == 1
     sampled, _, requested, excluded = context.model.expansion_calls[0]
     assert requested == 3
@@ -241,7 +244,7 @@ def test_legacy_mode_preserves_asymmetric_weighted_update(monkeypatch: pytest.Mo
     weight = torch.ones(2, dtype=torch.float64) if unique else torch.tensor([8, 1]) / sampled.detach().abs().square()
     hpsi = _hamiltonian()[:2, :3] @ amplitudes[:3].detach()
     energy = ((sampled.conj() * weight) @ hpsi) / ((sampled.conj() * weight) @ sampled.detach())
-    energy.real.backward()
+    energy.real.backward()  # type: ignore[no-untyped-call]
     assert amplitudes.grad is not None
     expected = amplitudes.detach() - 0.05 * amplitudes.grad
     torch.testing.assert_close(context.network.amplitude, expected, rtol=1e-11, atol=1e-12)
