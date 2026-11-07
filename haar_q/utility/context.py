@@ -236,7 +236,11 @@ class RuntimeContext:
         logging.info("Initializing the optimizer")
 
         optimizer_t = getattr(torch.optim, optimizer_config.name)
-        optimizer: torch.optim.Optimizer = optimizer_t(params=params, **optimizer_config.params)
+        # Torch saves group options in checkpoints. Keep YAML sequences as plain Python values.
+        options = typing.cast(
+            dict[str, typing.Any], omegaconf.OmegaConf.to_container(optimizer_config.params, resolve=True)
+        )
+        optimizer: torch.optim.Optimizer = optimizer_t(params=params, **options)
 
         if state_dict is not None:
             logging.info("Loading state dict of the optimizer")

@@ -30,7 +30,7 @@ def _resolve_input_paths(runtime_config: DictConfig, input_dir: Path) -> None:
 
 
 def _run(runtime_config: DictConfig) -> None:
-    from .utility.action_dict import action_dict
+    from .utility.action_dict import create_action
     from .utility.context import DACITE_CAST, RuntimeContext
 
     context = dacite.from_dict(
@@ -39,14 +39,9 @@ def _run(runtime_config: DictConfig) -> None:
         config=dacite.Config(cast=DACITE_CAST),
     )
     with context.reporting(runtime_config):
-        importlib.import_module(f".algorithms.{runtime_config.action.name}", package=__package__)
+        run = create_action(runtime_config.action)
         importlib.import_module(f".models.{runtime_config.model.name}", package=__package__)
         checkpoint_data = context.setup()
-        run = dacite.from_dict(
-            data_class=action_dict[runtime_config.action.name],  # type: ignore[arg-type]
-            data=OmegaConf.to_container(runtime_config.action.params, resolve=True),  # type: ignore[arg-type]
-            config=dacite.Config(cast=DACITE_CAST),
-        )
         run.main(context=context, runtime_config=runtime_config, checkpoint_data=checkpoint_data)
 
 

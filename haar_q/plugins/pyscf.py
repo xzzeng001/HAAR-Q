@@ -40,7 +40,6 @@ The returned ``ci`` dict may be passed back as ``ci0`` to warm-start
 subsequent calls.
 """
 
-import importlib
 import pathlib
 import shutil
 import tempfile
@@ -52,7 +51,7 @@ import omegaconf
 import torch
 
 from ..models.pyscf import Model, ModelConfig
-from ..utility.action_dict import action_dict
+from ..utility.action_dict import create_action
 from ..utility.context import DACITE_CAST, RuntimeContext
 from ..utility.model_dict import ModelProto
 
@@ -124,7 +123,7 @@ def _to_pyscf_ci(
     Convert HAAR-Q sampled configurations and amplitudes to a PySCF CI vector.
     """
     try:
-        from pyscf.fci import cistring
+        from pyscf.fci import cistring  # type: ignore[import-untyped]
     except ImportError:
         return None
 
@@ -190,7 +189,7 @@ def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, i
     Convert a PySCF CI vector back to a HAAR-Q checkpoint (sampled pool).
     """
     try:
-        from pyscf.fci import cistring
+        from pyscf.fci import cistring  # type: ignore[import-untyped]
     except ImportError:
         return {}
 
@@ -332,10 +331,9 @@ class Solver:
         n_spin = nalpha - nbeta
 
         # ------------------------------------------------------------------
-        # 2. Dynamic imports — mirroring __main__.py
+        # 2. Build the selected algorithm using the CLI parameter schema.
         # ------------------------------------------------------------------
-        importlib.import_module(f"haar_q.algorithms.{self.config.action.name}")
-        importlib.import_module("haar_q.models.pyscf")
+        run = create_action(self.config.action)
 
         # ------------------------------------------------------------------
         # 3. Build PySCF model from integral arrays
@@ -415,16 +413,7 @@ class Solver:
             checkpoint_data = context.setup()
 
             # ------------------------------------------------------------------
-            # 8. Instantiate algorithm — mirroring __main__.py
-            # ------------------------------------------------------------------
-            run = dacite.from_dict(
-                data_class=action_dict[self.config.action.name],
-                data=omegaconf.OmegaConf.to_container(self.config.action.params, resolve=True),  # type: ignore[arg-type]
-                config=dacite.Config(cast=DACITE_CAST),
-            )
-
-            # ------------------------------------------------------------------
-            # 9. Run algorithm — mirroring __main__.py
+            # 8. Run the algorithm.
             #    The base save() writes the checkpoint to the temp dir and
             #    then calls sys.exit(0) when max_absolute_step is reached.
             #    We catch the resulting SystemExit so kernel() can return.
@@ -439,7 +428,7 @@ class Solver:
                 pass
 
             # ------------------------------------------------------------------
-            # 10. Read the checkpoint that was saved by save()
+            # 9. Read the checkpoint that was saved by save()
             # ------------------------------------------------------------------
             data_path = tmpdir / "data.pth"
             if data_path.exists():
@@ -448,7 +437,7 @@ class Solver:
                 data = {}
 
             # ------------------------------------------------------------------
-            # 11. Extract energy and build ci output
+            # 10. Extract energy and build ci output
             # ------------------------------------------------------------------
             energy = _extract_energy(data, self.config.action.name, model)
             # Strip the random engine state — it is stale by the next call.

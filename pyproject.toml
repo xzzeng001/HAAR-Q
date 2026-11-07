@@ -61,6 +61,10 @@ haar-q = "haar_q.__main__:main"
 [tool.setuptools.packages.find]
 include = ["haar_q*"]
 
+[tool.setuptools.data-files]
+"share/haar-q" = ["input.yaml"]
+"share/haar-q/examples/hamiltonians" = ["examples/hamiltonians/H2.FCIDUMP"]
+
 [tool.setuptools.package-data]
 haar_q = [
   "hamiltonian/_hamiltonian.cpp",

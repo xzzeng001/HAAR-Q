@@ -1,5 +1,20 @@
 # HAAR-Q changelog
 
+## 0.2.0
+
+0.1.0 → 0.2.0 (MINOR). The input interface adds compatible names for sampling
+and optimization controls across the VMC and SCI workflows.
+
+- Start a CPU H₂ calculation with the annotated [standard input](input.yaml).
+  It includes model, network and action alternatives, their prerequisites,
+  restart settings and optimizer controls.
+- The [software overview](README.md#calculations-and-interfaces) lists the
+  available workflows, compatible networks and Python interfaces.
+- Pool pruning accepts both current HAAR-SCI checkpoints and legacy
+  `imag` checkpoints.
+- Optimizer options supplied as YAML lists, including Adam's `betas`, can
+  be saved and restored through the weights-only checkpoint loader.
+
 ## 0.1.0
 
 The previous checkout at `6d83bf5` followed the inherited `v0.0.58` tag.

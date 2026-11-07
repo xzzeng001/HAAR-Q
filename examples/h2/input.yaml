@@ -1,3 +1,4 @@
+# Compact H2 VMC example. The annotated input.yaml at the project root covers all workflows.
 common:
   device: cpu
   dtype: float64
@@ -25,10 +26,10 @@ action:
   name: vmc
   params:
     hamiltonian_guided: true
-    unique: true
-    sampling_count: 2
-    relative_count: 4
-    local_step: 10
+    unique_seeds: true
+    seed_count: 2
+    target_basis_size: 4
+    optimizer_steps: 10
 
 hydra:
   run:

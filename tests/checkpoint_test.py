@@ -4,8 +4,20 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from haar_q.utility.context import RuntimeContext
+
+
+def test_optimizer_yaml_sequences_survive_checkpoint(tmp_path: Path) -> None:
+    ctx = RuntimeContext(device=torch.device("cpu"))
+    config = OmegaConf.create({"name": "Adam", "params": {"betas": [0.8, 0.98]}})
+    optimizer = ctx.create_optimizer(config, [torch.nn.Parameter(torch.ones(1))])
+    checkpoint = tmp_path / "optimizer.pth"
+    torch.save(optimizer.state_dict(), checkpoint)
+    state = torch.load(checkpoint, weights_only=True)
+    resumed = ctx.create_optimizer(config, [torch.nn.Parameter(torch.ones(1))], state)
+    assert tuple(resumed.param_groups[0]["betas"]) == (0.8, 0.98)
 
 
 def test_checkpoint_on_a_filesystem_without_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -41,7 +41,10 @@ class ChopImagConfig:
             self.second_order_magnitude,
         )
 
-        configs, psi = data["imag"]["pool"]
+        state = data.get("haar", data.get("imag"))
+        if not state or state.get("pool") is None:
+            raise ValueError("chop_imag requires a HAAR-SCI checkpoint containing a configuration pool.")
+        configs, psi = state["pool"]
         configs = configs.to(device=context.device)
         psi = psi.to(device=context.device)
 

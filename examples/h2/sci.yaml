@@ -1,3 +1,4 @@
+# Compact H2 HAAR-SCI example. See the root input.yaml for the full Lanczos controls.
 common:
   device: cpu
   dtype: float64
@@ -24,11 +25,11 @@ optimizer:
 action:
   name: haar
   params:
-    sampling_count_from_neural_network: 2
-    sampling_count_from_last_iteration: 2
+    network_seed_count: 2
+    previous_seed_count: 2
     krylov_extend_count: 2
     krylov_iteration: 1
-    local_step: 10
+    optimizer_steps: 10
 
 hydra:
   run:
