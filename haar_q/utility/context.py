@@ -7,6 +7,9 @@ import logging
 import typing
 import pathlib
 import dataclasses
+import errno
+import shutil
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 import torch
@@ -123,16 +126,32 @@ class RuntimeContext:
             "device": dump_random_engine_state(self.device),
             "device_type": self.device.type,
         }
-        data_path = self.folder() / "data.pth"
-        local_data_path = self.folder() / f"data.{step}.pth"
-        torch.save(data, local_data_path)
-        if step % self.checkpoint_interval == 0:
-            temp_data_path = self.folder() / "data.pth.tmp"
-            temp_data_path.unlink(missing_ok=True)
-            temp_data_path.symlink_to(f"data.{step}.pth")
-            temp_data_path.replace(data_path)
-        else:
-            local_data_path.replace(data_path)
+        folder = self.folder()
+        latest = folder / "data.pth"
+        with tempfile.TemporaryDirectory(dir=folder, prefix=".checkpoint-") as staging:
+            snapshot = pathlib.Path(staging) / f"data.{step}.pth"
+            torch.save(data, snapshot)
+            if step % self.checkpoint_interval == 0:
+                staged_latest = pathlib.Path(staging) / latest.name
+                try:
+                    staged_latest.symlink_to(snapshot.name)
+                except OSError as exc:
+                    unsupported = exc.errno in {
+                        errno.EACCES,
+                        errno.EPERM,
+                        errno.ENOSYS,
+                        errno.ENOTSUP,
+                        errno.EOPNOTSUPP,
+                    }
+                    if not unsupported and getattr(exc, "winerror", None) not in {1, 50, 1314}:
+                        raise
+                    logging.info("Publishing a regular checkpoint file because symlinks are unavailable")
+                    shutil.copyfile(snapshot, staged_latest)
+                # Finish both writes before replacing either published checkpoint.
+                snapshot.replace(folder / snapshot.name)
+                staged_latest.replace(latest)
+            else:
+                snapshot.replace(latest)
         if self._report is not None:
             self._report.checkpoint(step, result)
         if self.max_relative_step is not None:

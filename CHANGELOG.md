@@ -11,6 +11,8 @@ input file explicitly while existing Hydra invocations remain supported.
   `haar-q -i input.yaml`.
 - Follow VMC and HAAR-SCI runs in the terminal and inspect the energy history
   in `OSZICAR` and the detailed execution log in `OUTCAR`.
+- Save numbered checkpoints and resume calculations on Windows-mounted drives
+  where WSL cannot create symbolic links.
 - Report the release version through the CLI, Python, package metadata and
   the calculation report. The [version policy](docs/versioning.md) describes
   how future deliveries are numbered and published.
