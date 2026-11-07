@@ -1,5 +1,21 @@
 # HAAR-Q changelog
 
+## 0.3.0
+
+0.2.0 → 0.3.0 (MINOR). The standard input gains independent selectors for
+calculation method, Hamiltonian, network architecture and optimizer.
+
+- Edit one selector in [input.yaml](input.yaml) or override it for one run,
+  for example with `python -m haar_q -i input.yaml method=haar`.
+- Keep shared sampling and training controls alongside per-module settings.
+  The program loads the selected modules with their English-annotated defaults
+  and checks their compatibility before constructing the calculation.
+- Use `--show-input` to print the effective calculation and data paths.
+  Existing YAML files with explicit component sections remain supported.
+- In `method=guide optim=lbfgs`, both training closures now clear gradients
+  at each evaluation. This corrects the accumulated gradients that could
+  affect the sampling network, wavefunction and their reported energies.
+
 ## 0.2.0
 
 0.1.0 → 0.2.0 (MINOR). The input interface adds compatible names for sampling

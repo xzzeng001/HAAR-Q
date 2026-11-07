@@ -1,0 +1,10 @@
+# @package _global_
+model:
+  name: openfermion
+  params: ${options.system.openfermion}
+default_symmetry: u1u1
+
+options:
+  system:
+    openfermion:
+      model_path: ${files.molecule} # MolecularData HDF5 file with integrals and numerical fci_energy.

@@ -1,0 +1,27 @@
+# @package _global_
+model:
+  name: ising
+  params: ${options.system.ising}
+default_symmetry: "0" # The transverse-field example needs unrestricted spin configurations.
+
+options:
+  system:
+    ising:
+      m: 2             # Number of columns in the open rectangular spin lattice.
+      n: 2             # Number of rows.
+      x: -1.0          # On-site X field.
+      y: 0.0           # On-site Y field.
+      z: 0.0           # On-site Z field.
+      xh: 0.0          # Horizontal XX coupling.
+      yh: 0.0          # Horizontal YY coupling.
+      zh: -1.0         # Horizontal ZZ coupling.
+      xv: 0.0          # Vertical XX coupling.
+      yv: 0.0          # Vertical YY coupling.
+      zv: -1.0         # Vertical ZZ coupling.
+      xd: 0.0          # Diagonal (i-1,j-1) XX coupling.
+      yd: 0.0          # Diagonal YY coupling.
+      zd: 0.0          # Diagonal ZZ coupling.
+      xa: 0.0          # Other diagonal (i-1,j+1) XX coupling.
+      ya: 0.0          # Other diagonal YY coupling.
+      za: 0.0          # Other diagonal ZZ coupling.
+      ref_energy: 0.0  # Reporting reference in lattice energy units.

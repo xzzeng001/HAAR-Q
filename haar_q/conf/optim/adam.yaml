@@ -1,0 +1,19 @@
+# @package _global_
+optimizer:
+  name: Adam
+  params: ${options.optim.adam}
+
+options:
+  optim:
+    adam:
+      lr: ${training.learning_rate} # Step length for a parameter update.
+      betas: [0.9, 0.999]          # First and second moment decay rates.
+      eps: 1.0e-8                  # Numerical stability term in the denominator.
+      weight_decay: 0.0            # Weight decay strength.
+      amsgrad: false               # Use a running maximum for the second moment.
+      foreach: null                # Null lets PyTorch select the multi-tensor implementation.
+      fused: null                  # Enable fused kernels on supported devices.
+      maximize: false              # Set true for gradient ascent.
+      capturable: false            # Enable graph capture on supported accelerators.
+      differentiable: false        # Track optimizer updates with autograd.
+      decoupled_weight_decay: false # Apply AdamW-style decay when true.

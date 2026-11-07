@@ -1,0 +1,27 @@
+# @package _global_
+# Expand the selected CI space, compute Ritz states and train the network for the next cycle.
+
+calculation_sections: [common, model, network, optimizer, action]
+action:
+  name: haar
+  params: ${options.method.haar}
+
+options:
+  method:
+    haar:
+      network_seed_count: ${sampling_control.seed_count} # Unique configurations drawn from the network per cycle.
+      previous_seed_count: ${sampling_control.seed_count} # Maximum number drawn from the previous pool, weighted by squared amplitude.
+      krylov_extend_count: 2                             # Hamiltonian neighbors per expansion. Zero fixes the basis. -1 selects the library heuristic.
+      krylov_extend_first: false                         # Expand before solving. This takes precedence over krylov_single_extend.
+      krylov_single_extend: false                        # Expand once between two solves. With both flags false, expand between Lanczos steps.
+      krylov_iteration: 1                                # Lanczos steps beyond the initial vector. Keep below the available basis dimension.
+      krylov_threshold: 1.0e-8                           # Residual-norm threshold for introducing a new orthogonal vector.
+      krylov_period: 256                                 # Add a new orthogonal vector at this interval in the Krylov basis.
+      krylov_eigen_count: 1                              # Number of lowest Ritz states retained, including the ground state.
+      optimizer_steps: ${training.optimizer_steps}       # Maximum network-fit updates per outer cycle.
+      local_loss: 1.0e-8                                 # Stop fitting when the loss or its absolute change drops below this threshold.
+      loss_name: sum_filtered_angle_scaled_log           # Loss used to fit the predicted amplitudes to the supervised target.
+      logging_psi: 4                                     # Maximum number of large target amplitudes to record in the detailed report.
+      local_batch_count_generation: 1                    # Number of chunks for unique network generation.
+      local_batch_count_apply_within: 1                  # Number of input chunks for a Lanczos Hamiltonian-vector product.
+      local_batch_count_loss_function: 1                 # Number of chunks for supervised fitting. Each chunk must contain configurations.

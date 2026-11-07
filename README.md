@@ -27,11 +27,11 @@ Theory and Computation*:
 
 The two main algorithm paths share the sampling and Hamiltonian infrastructure:
 
-- **HAAR-SCI** (`action.name: haar`) combines network sampling and a previous
+- **HAAR-SCI** (`method=haar`) combines network sampling and a previous
   configuration pool, expands the selected space using Hamiltonian connections,
   solves in that space with Lanczos, and trains the network for subsequent
   sampling.
-- **Hamiltonian-guided VMC** (`action.name: vmc`) samples, expands, and deduplicates
+- **Hamiltonian-guided VMC** (`method=vmc`) samples, expands, and deduplicates
   configurations, then directly optimizes the neural wavefunction's energy in
   the selected space. It does not use Lanczos or another eigensolver. This is a
   subsequent development of the toolkit; the cited paper is the reference for
@@ -42,15 +42,15 @@ published algorithm and is retained in scientific descriptions and citations.
 
 ## Calculations and interfaces
 
-The [standard input](input.yaml) runs molecular VMC as supplied. Its English
-comments cover the controls for each workflow. Choose an action according to
-the input data and the result you need.
+The [standard input](input.yaml) runs molecular VMC as supplied. Set `method`
+to choose a calculation. Each method loads its own parameters and uses the
+model, network and optimizer it needs.
 
 | Action | What it computes | Starting data or additional input |
 | --- | --- | --- |
 | `vmc` | Optimizes the neural wavefunction on sampled and Hamiltonian-connected configurations. The legacy sampled estimator is also available. | A model, a sampling-capable network and an optimizer |
 | `haar` | Expands a selected CI space, computes Ritz states with Lanczos, and fits the network for the next cycle. | A model and a network with unique sampling; the checkpoint stores the pool and requested Ritz states |
-| `guide` | Trains a separate sampling network from local-energy fluctuations alongside the wavefunction. | A second top-level `sampling` network configuration |
+| `guide` | Trains a separate sampling network from local-energy fluctuations alongside the wavefunction. | The method creates a second network using the selected ansatz. |
 | `pretrain` | Fits the network to known wavefunction amplitudes. | A Torch file containing packed configurations and their matching amplitudes as a pair of tensors |
 | `orbit` | Diagonalizes the spatial one-particle density matrix and writes a Hamiltonian in the natural-orbital basis. | A HAAR-SCI pool and its matching FCIDUMP |
 | `haar_with_orbit` | Alternates orbital rotation with selected-space Lanczos and neural fitting. | A matching molecular FCIDUMP; each cycle saves an optimized-basis file |
@@ -72,12 +72,15 @@ diagonal elements. The following choices are available for the sampling network.
 | Open-boundary `hubbard` lattice | The four molecular selectors, plus `mps` | Hopping, on-site interaction and chemical potential; the MPS samples without an electron-number constraint. |
 | Open-boundary `ising` spin lattice | `mlp/0`, `transformers/0`, `mlp/u1`, `transformers/u1`, `mps` | `/0` allows all spin configurations. The `/u1` options select the fixed half-filled sector. Choose a sector preserved by your Hamiltonian. |
 
-The lattice MPS supports sampling with replacement. For VMC set
-`unique_seeds: false`. HAAR-SCI requires unique generation. Transformer
-dimensions and sector-specific settings are listed in the standard input.
+The `system` selector supplies the default symmetry and `ansatz` supplies
+the sampling mode. For example, `system=ising ansatz=transformers` selects
+`transformers/0`, while `system=hubbard ansatz=mps` selects an MPS with
+replacement sampling. Both SCI methods require a network with unique generation.
 
 **Python interfaces.** `haar_q.plugins.pyscf.Solver.kernel` accepts one- and
 two-electron integral arrays and electron counts for a HAAR-SCI calculation.
+It accepts a resolved configuration with explicit component sections, as
+printed by `python -m haar_q -i input.yaml method=haar --show-input`.
 It can return a PySCF-shaped CI array with warm-start data. The underlying
 `pyscf` model receives NumPy arrays through Python. For a molecular YAML run,
 use an FCIDUMP, an OpenFermion MolecularData file, or a saved optimized-basis
@@ -153,9 +156,9 @@ The reference energy for the bundled integrals is −1.427525196849 hartree,
 including the constant term. A short run is sufficient to inspect the workflow.
 
 ```bash
-python -m haar_q -i examples/h2/sci.yaml                  # Run the compact HAAR-SCI example
-python -m haar_q -i input.yaml common.max_relative_step=20 # Change the number of VMC cycles
-python -m haar_q -i input.yaml --cfg job                  # Inspect the configuration
+python -m haar_q -i input.yaml method=haar                              # Run H2 HAAR-SCI
+python -m haar_q -i input.yaml system=ising ansatz=transformers         # Run spin-lattice VMC
+python -m haar_q -i input.yaml method=haar training.optimizer_steps=3 --show-input
 python -m haar_q --version
 ```
 
@@ -202,40 +205,72 @@ conventions of [VASP OSZICAR](https://vasp.at/wiki/OSZICAR) and
 
 ### Editing the standard input
 
-The active `common`, `model`, `network`, `optimizer` and `action` sections
-form one H₂ job. The values are deliberately small. The `hydra.run.dir`
-setting gives each invocation its own output directory. To switch workflows,
-replace the whole relevant section with one of the commented alternatives
-and supply any checkpoint, integral file or dataset named there. This keeps
-parameters for one algorithm out of another algorithm's input.
+Edit the four selectors at the top of [input.yaml](input.yaml). For example,
+change `- method: vmc` to `- method: haar` and rerun the same command for
+HAAR-SCI on the same Hamiltonian. To change a choice for one run, append
+`method=haar` to the command. Each selector loads a packaged YAML with
+English comments for its parameters.
 
-| If you want to change… | Edit |
-| --- | --- |
-| Hamiltonian, molecule, lattice size or couplings | `model.name` and its `model.params` |
-| Network family, symmetry, width or depth | `network.name` and its `network.params` |
-| Device, precision, seed, number of cycles or restart | `common`; set `random_seed: null` to restore the checkpoint's RNG state |
-| Optimizer or learning rate | `optimizer.name` and the keyword arguments in `optimizer.params` for that PyTorch optimizer |
-| Sample size, expansion, Lanczos or network updates | The selected `action.params` block |
-
-For a one-off test, override an active key on the command line, for example
-`python -m haar_q -i input.yaml action.params.optimizer_steps=3`.
-`--cfg job` previews the composed YAML. Previous inputs may keep their
-original parameter names. Use one spelling per control and use the spelling
-in your file for a Hydra override.
-
-| Workflow | Preferred input key | Original key |
+| Selector | Choices | Parameter reference |
 | --- | --- | --- |
-| VMC, guide | `seed_count` | `sampling_count` |
-| VMC, guide | `target_basis_size` | `relative_count` |
-| VMC, guide | `unique_seeds` | `unique` |
-| VMC, guide and both SCI actions | `optimizer_steps` | `local_step` |
-| Guide | `sampler_steps_per_update` | `dist_step` |
-| Both SCI actions | `network_seed_count` | `sampling_count_from_neural_network` |
-| Both SCI actions | `previous_seed_count` | `sampling_count_from_last_iteration` |
+| `method` | `vmc`, `haar`, `guide`, `pretrain`, `pert`, `chop_imag`, `orbit`, `haar_with_orbit` | [Calculation methods](haar_q/conf/method) |
+| `system` | `fcidump`, `hubbard`, `ising`, `openfermion`, `optimized_basis` | [Hamiltonians and lattice couplings](haar_q/conf/system) |
+| `ansatz` | `mlp`, `transformers`, `mps` | [Network architectures](haar_q/conf/ansatz) |
+| `optim` | `adam`, `lbfgs` | [Optimizers](haar_q/conf/optim) |
+
+Use `common` for runtime settings and `files` for data paths. Set
+`sampling_control.seed_count` once for the VMC, guide and SCI methods.
+`sampling_control.target_basis_size` applies to VMC and guide. SCI controls
+expansion separately through its Krylov parameters. `training.optimizer_steps`
+controls network updates for VMC, guide and both SCI methods.
+`training.learning_rate` sets the initial step size for either optimizer.
+
+Use `options.<group>.<choice>` for a setting specific to one module. The
+following entries can coexist under the same `options` key in your input.
+Switching methods keeps each method's settings available for the next run.
+
+```yaml
+options:
+  method:
+    vmc: {hamiltonian_guided: true}
+    haar: {krylov_iteration: 1}
+  system:
+    hubbard: {m: 4, n: 2, u: 8.0}
+  ansatz:
+    mlp: {hidden: [32, 16]}
+```
+
+A value set for a specific module takes precedence over its default, including
+a default inherited from a shared setting. For example, setting
+`options.method.haar.network_seed_count` changes only the SCI network sample
+count. The previous-pool sample count still follows `sampling_control.seed_count`.
+Append `--show-input` to print the selected calculation, resolved settings
+and data paths without starting a run. Pool post-processing loads the model
+and checkpoint and omits the network and optimizer.
+
+For example, run a short SCI calculation and use its pool for a second-order
+correction from the project root. Choose a fresh output directory for the
+first run. Both invocations read the same input.
+
+```powershell
+python -m haar_q -i input.yaml method=haar hydra.run.dir=outputs/sci-example
+python -m haar_q -i input.yaml method=pert common.parent_path=outputs/sci-example/data.pth
+```
+
+For supervised training, select `method=pretrain` and supply `files.dataset`.
+For natural orbitals, select `method=orbit`, supply the SCI checkpoint and
+matching `files.fcidump`, and choose a destination in `files.orbital_output`.
+To use the rotated Hamiltonian, select `system=optimized_basis` and set
+`files.optimized_basis` to that output file.
+
+Existing explicit YAML jobs with `action`, `model`, `network` and `optimizer`
+sections still run, including the [compact SCI example](examples/h2/sci.yaml).
+Use the selectors with the new standard input. Use existing parameter names
+when overriding keys in older files.
 
 #### Hamiltonian-guided VMC
 
-`action.name: vmc` now defaults to Hamiltonian-guided optimization on an
+`method=vmc` defaults to Hamiltonian-guided optimization on an
 expanded configuration space, without Lanczos or any eigensolver:
 
 1. Sample configurations from the current neural wavefunction.
@@ -251,31 +286,17 @@ The native Hamiltonian operation runs without autograd. A detached-residual
 surrogate supplies the full Rayleigh-quotient gradient for a Hermitian
 Hamiltonian, including normalization and the factor of two.
 
-For example, replace the `action` section of your existing configuration with:
-
-```yaml
-action:
-  name: vmc
-  params:
-    hamiltonian_guided: true
-    seed_count: 1024
-    target_basis_size: 4096
-    optimizer_steps: 1000
-    unique_seeds: true
-```
-
-`target_basis_size` is the target **total** number of configurations, not the
-number of neighbors per sampled state. Expansion makes one `find_relative`
+Set `sampling_control.target_basis_size` to the target **total** number of
+configurations. Expansion makes one `find_relative`
 call per outer cycle. Fewer states may be returned after selection and
 deduplication. If this target is no larger than the sampled set, expansion
 is skipped and all sampled states are retained. The set remains fixed during
 the `optimizer_steps` optimizer updates. Use `common.max_relative_step` or
 `common.max_absolute_step` to limit the number of outer cycles.
 
-The example uses smaller sets than the defaults (4000 sampled, 40000 total).
-The expanded set now participates in network backpropagation, increasing
-memory use compared with the legacy objective; scale these counts to fit
-your system.
+The standard H₂ input requests two seeds and an expanded basis of four.
+The expanded set participates in network backpropagation. Size larger runs
+according to the available memory.
 
 With `hamiltonian_guided: true`, `unique_seeds: false` changes how seed states are
 sampled, but sample multiplicities are not used as energy weights: each state
@@ -284,8 +305,8 @@ the neural wavefunction projected onto `S`, not a Monte Carlo estimate of
 the untruncated neural wavefunction's energy. Expanding the set does not by
 itself guarantee an energy decrease before optimization.
 
-**Compatibility:** to reproduce the previous VMC objective, explicitly set
-`hamiltonian_guided: false`. That mode uses only the sampled states on the
+To reproduce the original sampled VMC objective, set
+`options.method.vmc.hamiltonian_guided=false`. That mode uses only the sampled states on the
 left side of the energy estimator, includes neighbors on the Hamiltonian
 application side, and retains the original sampling weights and gradient.
 Existing checkpoints keep their format, but resuming with the new default

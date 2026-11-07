@@ -1,0 +1,11 @@
+# @package _global_
+# Estimate the second-order contribution from one external batch connected to a saved HAAR pool.
+
+calculation_sections: [common, model, action]
+action:
+  name: pert
+  params: ${options.method.pert}
+
+options:
+  method:
+    pert: {}  # Uses only the Hamiltonian and the input pool.

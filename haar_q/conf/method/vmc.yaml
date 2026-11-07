@@ -1,0 +1,16 @@
+# @package _global_
+# Sample configurations, expand them through the Hamiltonian, then optimize the wavefunction.
+
+calculation_sections: [common, model, network, optimizer, action]
+action:
+  name: vmc
+  params: ${options.method.vmc}
+
+options:
+  method:
+    vmc:
+      seed_count: ${sampling_control.seed_count}         # Configurations requested from each sampling network per cycle.
+      target_basis_size: ${sampling_control.target_basis_size} # Target total Hamiltonian neighborhood size, including the seeds.
+      optimizer_steps: ${training.optimizer_steps}       # Wavefunction optimizer steps per outer cycle.
+      unique_seeds: ${sampling_control.unique_seeds}     # Draw unique seeds. False samples with replacement and coalesces duplicates.
+      hamiltonian_guided: true                           # Use the selected-space Rayleigh quotient. False selects the legacy estimator.

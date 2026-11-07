@@ -1,4 +1,4 @@
-# Compact H2 HAAR-SCI example. See the root input.yaml for the full Lanczos controls.
+# Compact H2 HAAR-SCI example. See haar_q/conf/method/haar.yaml for the full Lanczos controls.
 common:
   device: cpu
   dtype: float64

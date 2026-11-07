@@ -1,0 +1,10 @@
+# @package _global_
+network:
+  name: mps
+  params: ${options.ansatz.mps}
+supports_unique: false # The lattice MPS supports sampling with replacement.
+
+options:
+  ansatz:
+    mps:
+      virtual_dim: 16 # Positive bond dimension of the open-boundary MPS.

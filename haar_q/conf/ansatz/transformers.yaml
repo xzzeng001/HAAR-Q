@@ -1,0 +1,16 @@
+# @package _global_
+network:
+  name: transformers/${symmetry}
+  params: ${options.ansatz.transformers}
+supports_unique: true
+
+options:
+  ansatz:
+    transformers:
+      embedding_dim: 32       # Token embedding width.
+      heads_num: 4            # Attention heads. This must divide embedding_dim.
+      feed_forward_dim: 64    # Hidden width of each feed-forward expert.
+      shared_expert_num: 1    # Experts applied to every token.
+      routed_expert_num: 0    # Total experts available to the router.
+      selected_expert_num: 0  # Routed experts chosen per token (0 through routed_expert_num).
+      depth: 2                # Number of decoder layers.

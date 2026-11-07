@@ -1,0 +1,15 @@
+# @package _global_
+optimizer:
+  name: LBFGS
+  params: ${options.optim.lbfgs}
+
+options:
+  optim:
+    lbfgs:
+      lr: ${training.learning_rate} # Step length scale.
+      max_iter: 20                 # Maximum inner iterations per optimizer step.
+      max_eval: null               # Objective evaluations per step. Null uses the PyTorch default.
+      tolerance_grad: 1.0e-7       # First-order optimality tolerance.
+      tolerance_change: 1.0e-9     # Threshold for parameter or objective changes.
+      history_size: 100            # Curvature updates retained in memory.
+      line_search_fn: null         # Null or strong_wolfe.

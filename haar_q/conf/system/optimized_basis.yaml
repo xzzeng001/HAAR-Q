@@ -1,0 +1,11 @@
+# @package _global_
+model:
+  name: optimized_basis
+  params: ${options.system.optimized_basis}
+default_symmetry: u1u1
+
+options:
+  system:
+    optimized_basis:
+      model_path: ${files.optimized_basis} # Tensor file created by an orbital rotation workflow.
+      ref_energy: 0.0                     # Zero selects the reference stored with those integrals.

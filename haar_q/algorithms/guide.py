@@ -113,6 +113,7 @@ class GuideConfig:
                 )
 
             def energy_sampling() -> torch.Tensor:
+                optimizer_network.zero_grad()
                 configs_src = configs_src_sampling
                 configs_dst = configs_dst_sampling
                 psi_src = network(configs_src)
@@ -140,6 +141,7 @@ class GuideConfig:
                     return energy.real
 
             def distribution() -> torch.Tensor:
+                optimizer_sampling.zero_grad()
                 configs_src = configs_src_sampling
                 configs_dst = configs_dst_sampling
                 with torch.no_grad():
@@ -165,7 +167,6 @@ class GuideConfig:
             logging.info("Starting local optimization process")
 
             for i in range(self.local_step):
-                optimizer_network.zero_grad()
                 sampling_energy: torch.Tensor = optimizer_network.step(energy_sampling)  # type: ignore[assignment,arg-type]
                 network_energy: torch.Tensor = energy_network()
                 logging.info(
@@ -180,7 +181,6 @@ class GuideConfig:
                 writer.add_scalar("guide/energy/network", network_energy, data["guide"]["local"])  # type: ignore[no-untyped-call]
                 writer.add_scalar("guide/error/network", network_energy - model.ref_energy, data["guide"]["local"])  # type: ignore[no-untyped-call]
                 for _ in range(self.dist_step):
-                    optimizer_sampling.zero_grad()
                     dist_loss: torch.Tensor = optimizer_sampling.step(distribution)  # type: ignore[assignment,arg-type]
                     writer.add_scalar("guide/dist/loss", dist_loss, data["guide"]["dist"])  # type: ignore[no-untyped-call]
                     data["guide"]["dist"] += 1

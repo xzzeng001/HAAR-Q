@@ -1,0 +1,13 @@
+# @package _global_
+# Prune a saved HAAR-SCI pool and measure energy as a function of retained pool size.
+
+calculation_sections: [common, model, action]
+action:
+  name: chop_imag
+  params: ${options.method.chop_imag}
+
+options:
+  method:
+    chop_imag:
+      chop_size: 1                                       # Positive number of configurations removed per iteration.
+      second_order_magnitude: 0.0                        # Weight of squared amplitude in the ranking. A negative value ranks by squared amplitude alone.

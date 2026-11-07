@@ -1,0 +1,13 @@
+# @package _global_
+# Fit the wavefunction to saved packed configurations and complex reference amplitudes.
+
+calculation_sections: [common, model, network, optimizer, action]
+action:
+  name: pretrain
+  params: ${options.method.pretrain}
+
+options:
+  method:
+    pretrain:
+      dataset_path: ${files.dataset}                     # Path to a Torch file containing the pair (uint8 packed configurations, amplitudes).
+      loss_name: sum_filtered_angle_scaled_log           # Loss used to compare predicted and reference amplitudes.

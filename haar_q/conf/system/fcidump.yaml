@@ -1,0 +1,11 @@
+# @package _global_
+model:
+  name: fcidump
+  params: ${options.system.fcidump}
+default_symmetry: u1u1
+
+options:
+  system:
+    fcidump:
+      model_path: ${files.fcidump}     # FCIDUMP integrals in plain text or gzip format.
+      ref_energy: ${files.ref_energy} # Reference in hartree. Null uses the adjacent FCIDUMP.yaml lookup.

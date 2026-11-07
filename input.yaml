@@ -1,253 +1,47 @@
-# HAAR-Q standard input
-# Run from the checkout using python -m haar_q -i input.yaml
-# Preview the configured job using python -m haar_q -i input.yaml --cfg job
-# The active sections run two CPU cycles of Hamiltonian-guided VMC for the bundled H2.
-# Edit values here for a new experiment. The commented alternatives below are
-# complete replacement sections. Enable one model, one network and one action at a time.
-# File paths in an explicit -i input are relative to this file. Hydra run paths
-# are relative to the launch directory unless you supply an absolute path.
+# HAAR-Q calculation input. Launch with python -m haar_q -i input.yaml
+# Edit the four choices below, or override any choice on the command line.
+defaults:
+  - method: vmc        # vmc, haar, guide, pretrain, pert, chop_imag, orbit, haar_with_orbit
+  - system: fcidump    # fcidump, hubbard, ising, openfermion, optimized_basis
+  - ansatz: mlp        # mlp, transformers, mps (lattice models only)
+  - optim: adam        # adam, lbfgs
+  - _self_             # The settings in this file take precedence over the module defaults.
 
 common:
-  device: cpu               # Compute device. Use cuda:0 with a CUDA-capable build.
-  dtype: float64            # Network parameter dtype: float64, float32, float16, bfloat16, or null to keep its dtype.
-  random_seed: 2333         # Fix the PyTorch seed. Set null to recover saved RNG state on restart.
-  parent_path: null         # Optional checkpoint file, e.g. outputs/vmc/<run>/data.pth.
-                            # With null, look for data.pth in this job's output directory.
-  checkpoint_interval: 5    # Keep a numbered snapshot every N saves (N >= 1); update data.pth at every save.
-  max_relative_step: 2      # Number of new outer cycles to run. Positive integer, or null.
-  max_absolute_step: null   # Alternative absolute stopping cycle. Set only one non-null limit.
+  device: cpu
+  dtype: float64
+  max_relative_step: 2      # New outer cycles to run. Set null to use an absolute limit instead.
+  max_absolute_step: null   # Stop at this total cycle number, including earlier checkpoint cycles.
+  random_seed: 2333         # Set null on restart to restore the checkpoint RNG state.
+  parent_path: null         # Checkpoint to resume or analyze. Required for pool post-processing in a fresh directory.
+  checkpoint_interval: 5   # Save a numbered snapshot every N saves, in addition to data.pth.
 
-model:
-  name: fcidump                              # Molecular one- and two-electron integrals.
-  params:
-    model_path: examples/hamiltonians/H2.FCIDUMP  # Plain text or .gz; header supplies NORB, NELEC and MS2.
-    ref_energy: -1.4275251968493827           # Logging reference in hartree for this particular H2 file.
-    # Set ref_energy to null to look up the filename in a neighboring FCIDUMP.yaml.
-    # If no reference is available, the reported reference defaults to zero.
+files:                      # Relative data paths start at this YAML file.
+  fcidump: examples/hamiltonians/H2.FCIDUMP
+  ref_energy: -1.4275251968493827  # Hartree for this H2 input. Update or clear when changing the molecule.
+  molecule: null            # OpenFermion MolecularData file for system=openfermion.
+  optimized_basis: null     # Tensor file from an orbital calculation for system=optimized_basis.
+  dataset: null             # Torch (packed configurations, amplitudes) pair for method=pretrain.
+  orbital_output: outputs/H2-natural-orbitals.pt  # Destination of the orbit post-processing action.
 
-network:
-  name: mlp/u1u1                             # Spin-resolved autoregressive MLP for the active H2 example.
-  params:
-    hidden: [16]                             # Width of each hidden layer, in order. Library default: [512].
+symmetry: ${default_symmetry}      # Model default: u1u1 for electronic systems, 0 for Ising.
+sampling_control:
+  seed_count: 2                    # Starting samples for VMC, guide and SCI.
+  target_basis_size: 4             # Total target for VMC/guide. SCI uses Krylov expansion controls.
+  unique_seeds: ${supports_unique} # Automatic for the selected network. MPS uses sampling with replacement.
+training:
+  optimizer_steps: 10              # Wavefunction updates per cycle for VMC, guide and SCI.
+  learning_rate: 0.01              # Shared initial step size of the selected optimizer.
 
-action:
-  name: vmc                         # Variational Monte Carlo with an autoregressive wavefunction.
-  params:
-    seed_count: 2                   # Configurations requested from the network per cycle (default 4000).
-    target_basis_size: 4            # Target TOTAL after one H-connected expansion (default 40000). All seeds remain.
-    optimizer_steps: 10             # Weight updates on the same configurations before resampling (default 1000).
-    unique_seeds: true              # Sample distinct seeds. False draws with replacement and coalesces duplicates.
-    hamiltonian_guided: true        # Optimize the selected-space Rayleigh quotient. False uses the legacy estimator.
-
-optimizer:
-  name: Adam                # Case-sensitive class from torch.optim. Use an optimizer with closure support.
-  params:
-    lr: 0.01                # Learning rate for this H2 test.
-    betas: [0.9, 0.999]     # Adam decay rates for the first and second moments.
-    eps: 1.0e-8             # Numerical stability term in the Adam denominator.
-    weight_decay: 0.0       # Strength of weight decay. Zero disables it.
-    amsgrad: false          # Keep a running maximum of the second moment if true.
-    # The following are optional PyTorch Adam flags; support depends on the device and installed Torch.
-    # foreach: null         # Select the multi-tensor implementation automatically when null.
-    # fused: null           # Allow Torch to choose the update implementation when null.
-    # capturable: false     # Enable graph capture on supported accelerators.
-    # differentiable: false # Track the optimizer update with autograd when supported.
-    # maximize: false       # Minimize the objective. True reverses the optimization direction.
-    # decoupled_weight_decay: false  # Use decoupled (AdamW-style) weight decay when true.
+# Module-specific settings can coexist here. Only selected modules participate in the job.
+options:
+  method:
+    vmc: {hamiltonian_guided: true}    # Expand the basis and minimize its projected energy without Lanczos.
+    haar: {krylov_iteration: 1}        # Lanczos steps beyond the initial vector in the H2 example.
+  ansatz:
+    mlp: {hidden: [16]}                # Hidden layer widths.
 
 hydra:
+  searchpath: [pkg://haar_q.conf]     # Load the calculation modules shipped with HAAR-Q.
   run:
-    dir: outputs/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}  # Separate directory per run.
-
-# MODEL ALTERNATIVES
-# Replace the active model section and choose a compatible network.
-# model:
-#   name: openfermion
-#   params:
-#     model_path: molecule.hdf5              # OpenFermion MolecularData with integrals, electron count and numeric fci_energy.
-
-# model:
-#   name: optimized_basis
-#   params:
-#     model_path: optimized.pth              # Orbital-optimization output with Hamiltonian tensors and system size.
-#     ref_energy: 0.0                        # Zero selects the file's ref_energy if present, otherwise zero.
-
-# model:
-#   name: hubbard                            # Open rectangular lattice; two spin orbitals per site.
-#   params:
-#     m: 2                                   # Number of lattice columns (positive integer).
-#     n: 2                                   # Number of lattice rows (positive integer).
-#     t: 1.0                                 # Nearest-neighbor hopping amplitude, with matrix element -t.
-#     u: 4.0                                 # On-site interaction energy for double occupation (default 0).
-#     mu: 0.0                                # Chemical potential multiplying minus the particle number.
-#     electron_number: null                  # Conserving networks: null = half filling (m*n), range 0..2*m*n.
-#     ref_energy: 0.0                        # Logging reference in the same units as t, u and mu.
-
-# model:
-#   name: ising                              # Open rectangular lattice; pair couplings multiply Pauli operators.
-#   params:
-#     m: 2                                   # Number of lattice columns.
-#     n: 2                                   # Number of lattice rows.
-#     x: -1.0                                # Uniform on-site X field. All field and bond defaults are zero.
-#     y: 0.0                                 # Uniform on-site Y field.
-#     z: 0.0                                 # Uniform on-site Z field.
-#     xh: 0.0                                # Horizontal XX coupling.
-#     yh: 0.0                                # Horizontal YY coupling.
-#     zh: -1.0                               # Horizontal ZZ coupling.
-#     xv: 0.0                                # Vertical XX coupling.
-#     yv: 0.0                                # Vertical YY coupling.
-#     zv: -1.0                               # Vertical ZZ coupling.
-#     xd: 0.0                                # Diagonal (i-1,j-1) XX coupling.
-#     yd: 0.0                                # Diagonal YY coupling.
-#     zd: 0.0                                # Diagonal ZZ coupling.
-#     xa: 0.0                                # Other diagonal (i-1,j+1) XX coupling.
-#     ya: 0.0                                # Other diagonal YY coupling.
-#     za: 0.0                                # Other diagonal ZZ coupling.
-#     ref_energy: 0.0                        # Logging reference in the input Hamiltonian's units.
-
-# For PySCF integral arrays, call haar_q.plugins.pyscf.Solver(config).kernel
-# in Python. The h1e and eri arrays, norb, nelec, nuclear_repulsion and
-# ref_energy are kernel arguments. The plugin constructs the pyscf model.
-
-# NETWORK ALTERNATIVES
-# FCIDUMP, optimized_basis, OpenFermion and Hubbard accept mlp/u1u1,
-# transformers/u1u1, mlp/u1 or transformers/u1. The PySCF adapter has the
-# same choices. /u1u1 fixes alpha and beta counts separately. /u1 fixes
-# their sum. OpenFermion /u1u1 assumes an even electron count with equal
-# spin populations; choose /u1 for total-number sampling in other cases.
-# Ising accepts mlp/0 and transformers/0 for unrestricted spins. Its /u1
-# variants fix floor(m*n/2) occupied sites; use /0 for the transverse field
-# example in the model section. Hubbard and Ising also register the MPS block below.
-
-# network:
-#   name: transformers/u1u1                  # Choose the /u1u1, /u1 or /0 suffix supported by your model.
-#   params:
-#     embedding_dim: 32                      # Token embedding width (default 512).
-#     heads_num: 4                           # Attention heads; must divide embedding_dim (default 8).
-#     feed_forward_dim: 64                   # Hidden width of each feed-forward expert (default 2048).
-#     shared_expert_num: 1                   # Experts evaluated for every token.
-#     routed_expert_num: 0                   # Number of routed experts available to the gate.
-#     selected_expert_num: 0                 # Routed experts chosen per token, from 0 through routed_expert_num.
-#     depth: 2                               # Number of stacked decoder layers (default 6).
-
-# network:
-#   name: mps                                # Real open-boundary matrix product state on Ising/Hubbard.
-#   params:
-#     virtual_dim: 16                        # Bond dimension (positive integer).
-# MPS samples with replacement and does not impose a fixed particle number.
-# Use VMC with unique_seeds: false. HAAR-SCI requires unique seed generation.
-
-# ACTION ALTERNATIVES
-# Replace the active action section. Remove the leading "# " on the chosen
-# YAML lines. For guide, include the top-level sampling key too.
-# For HAAR-SCI and pretrain, loss_name accepts:
-#   direct, log, sum_reweighted_log, sum_filtered_log, sum_filtered_scaled_log,
-#   sum_reweighted_angle_log, sum_filtered_angle_log, sum_filtered_angle_scaled_log.
-# "direct" fits complex amplitudes by squared error. The log losses combine
-# log-magnitude and wrapped phase errors, with different low-amplitude weights.
-
-# HAAR-SCI samples, merges prior seeds, expands with H, and fits the network
-# to the square root of the summed Ritz-state probabilities.
-# action:
-#   name: haar
-#   params:
-#     network_seed_count: 2                  # Unique network seeds per cycle (default 1024).
-#     previous_seed_count: 2                 # Max draws from the prior pool, weighted by |psi|^2 (default 1024).
-#     krylov_extend_count: 2                 # Neighbors requested per expansion. 0 fixes the basis. -1 selects 64, or 2048 for single expansion.
-#     krylov_extend_first: false             # Expand before solving. Takes precedence over krylov_single_extend.
-#     krylov_single_extend: false            # Expand once between two solves. With both flags false, expand between Lanczos iterations.
-#     krylov_iteration: 1                    # Lanczos steps beyond the initial vector (default 32). Keep below the H2 basis dimension.
-#     krylov_threshold: 1.0e-8               # Lanczos residual-norm threshold for choosing a new orthogonal vector.
-#     krylov_period: 256                     # Positive interval for introducing a new orthogonal Krylov vector.
-#     krylov_eigen_count: 1                  # Number of lowest Ritz states requested, including the ground state.
-#     optimizer_steps: 10                    # Maximum network-fit updates per outer cycle. A value of -1 selects 10000.
-#     local_loss: 1.0e-8                     # Stop fitting if the loss or absolute loss change is below this threshold.
-#     loss_name: sum_filtered_angle_scaled_log  # Function used to compare predicted and target amplitudes.
-#     logging_psi: 4                         # Max configurations to log, ordered by target magnitude (default 30).
-#     local_batch_count_generation: 1        # Number of chunks for network generation. Use a positive integer.
-#     local_batch_count_apply_within: 1      # Number of input chunks for a Lanczos H-vector product.
-#     local_batch_count_loss_function: 1     # Number of chunks for the supervised fit. Keep each chunk nonempty.
-
-# Guide trains separate wavefunction and sampling networks. Include the
-# top-level sampling block with the action. Both use the optimizer settings.
-# action:
-#   name: guide
-#   params:
-#     seed_count: 2                   # Configurations drawn from EACH network per cycle (default 4000).
-#     target_basis_size: 4            # Target total size of each network's Hamiltonian neighborhood (default 40000).
-#     optimizer_steps: 10             # Wavefunction updates per outer cycle (default 1000).
-#     sampler_steps_per_update: 1     # Sampler fits per wavefunction update (default 100).
-#     unique_seeds: true              # Draw distinct seeds from each network. False uses sample counts for reweighting.
-# sampling: ${network}                # A second, independently trained instance with the same architecture.
-
-# Pretrain fits supplied amplitudes. Prepare a torch.save((configs, psi), path)
-# dataset with bit-packed uint8 configurations [N, ceil(n_qubits/8)] and a
-# complex amplitude vector [N], in the model's spin-orbital ordering.
-# action:
-#   name: pretrain
-#   params:
-#     dataset_path: data/training.pt           # Required labeled dataset, relative to this YAML.
-#     loss_name: sum_filtered_angle_scaled_log # Amplitude loss from the list above.
-
-# Pert estimates a second-order correction for one batch of external states.
-# Set common.parent_path to a compatible HAAR-SCI data.pth.
-# Use the same Hamiltonian and orbital ordering as that run.
-# action:
-#   name: pert
-#   params: {}                         # All calculation data come from the model and the checkpoint.
-
-# Chop ranks configurations in a saved HAAR-SCI (or legacy imag) pool and
-# tracks energy as they are removed. Set common.parent_path to its data.pth
-# and use the same Hamiltonian.
-# action:
-#   name: chop_imag
-#   params:
-#     chop_size: 1                     # Number removed per pass. Use a positive count (default 10000).
-#     second_order_magnitude: 0.0      # Weight of |psi|^2 in the removal score. A negative value ranks by |psi|^2 alone.
-
-# Orbit computes spin-restricted natural orbitals from a HAAR-SCI pool and
-# writes the rotated Hamiltonian for model.name = optimized_basis. Supply the
-# matching molecular checkpoint and original FCIDUMP for this single pass.
-# action:
-#   name: orbit
-#   params:
-#     src_fcidump: examples/hamiltonians/H2.FCIDUMP  # Original integrals in the same basis as the pool.
-#     dst_optimized: outputs/H2-natural-orbitals.pt  # Output model file relative to this YAML. Replaces any existing file.
-#     ref_energy: null                              # Stored reference energy in hartree. A null value copies the model reference.
-
-# Iterative orbital optimization rotates a restricted molecular Hamiltonian
-# before each selected-space solve. Each cycle writes optimized_basis_step_*.pt.
-# Keep these files with the run when resuming it.
-# action:
-#   name: haar_with_orbit
-#   params:
-#     src_fcidump: examples/hamiltonians/H2.FCIDUMP  # Original restricted molecular integrals used for each rotation.
-#     network_seed_count: 2                 # Unique network seeds requested per cycle (default 1024).
-#     previous_seed_count: 2                # Max configurations sampled from the previous pool (default 1024).
-#     krylov_extend_count: 2                # Requested new neighbors per expansion. 0 fixes the basis. A value of -1 uses the HAAR heuristic above.
-#     krylov_extend_first: false            # Expand before solving. Takes precedence over single expansion.
-#     krylov_single_extend: false           # Expand once between solves. Two false flags enable iterative expansion.
-#     krylov_iteration: 1                   # Lanczos steps beyond the initial vector (default 32).
-#     krylov_threshold: 1.0e-8              # Residual-norm threshold for a new orthogonal vector.
-#     krylov_period: 256                    # Positive interval for introducing a new orthogonal Krylov vector.
-#     krylov_eigen_count: 1                 # Lowest Ritz states to retain, including the ground state.
-#     optimizer_steps: 10                   # Network-fit update limit per cycle. A value of -1 selects 10000.
-#     local_loss: 1.0e-8                    # Early stopping threshold on loss or absolute loss change.
-#     loss_name: sum_filtered_angle_scaled_log  # Amplitude loss used for the fit.
-#     logging_psi: 4                        # Number of largest target amplitudes logged (default 30).
-#     local_batch_count_generation: 1       # Number of chunks for generation.
-#     local_batch_count_apply_within: 1     # Number of input chunks for each Lanczos H-vector product.
-#     local_batch_count_loss_function: 1    # Number of chunks for fitting the network.
-
-# OPTIMIZER ALTERNATIVE
-# Optimizer alternative. Replace the entire optimizer section to use LBFGS.
-# optimizer:
-#   name: LBFGS
-#   params:
-#     lr: 1.0                    # Step length scale.
-#     max_iter: 20               # Maximum inner iterations per optimizer step.
-#     max_eval: null             # Objective evaluations per step. Null uses the PyTorch default.
-#     tolerance_grad: 1.0e-7     # First-order optimality tolerance.
-#     tolerance_change: 1.0e-9   # Stop on small parameter or objective changes.
-#     history_size: 100           # Maximum curvature updates retained in memory.
-#     line_search_fn: null       # No line search, or strong_wolfe.
+    dir: outputs/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

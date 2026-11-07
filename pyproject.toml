@@ -66,6 +66,7 @@ include = ["haar_q*"]
 "share/haar-q/examples/hamiltonians" = ["examples/hamiltonians/H2.FCIDUMP"]
 
 [tool.setuptools.package-data]
+"haar_q.conf" = ["method/*.yaml", "system/*.yaml", "ansatz/*.yaml", "optim/*.yaml"]
 haar_q = [
   "hamiltonian/_hamiltonian.cpp",
   "hamiltonian/_hamiltonian_cpu.cpp",

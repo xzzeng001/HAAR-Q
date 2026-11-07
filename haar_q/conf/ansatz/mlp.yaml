@@ -1,0 +1,10 @@
+# @package _global_
+network:
+  name: mlp/${symmetry}
+  params: ${options.ansatz.mlp}
+supports_unique: true
+
+options:
+  ansatz:
+    mlp:
+      hidden: [16] # Width of each hidden layer in order.

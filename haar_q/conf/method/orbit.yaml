@@ -1,0 +1,14 @@
+# @package _global_
+# Compute natural orbitals from a saved HAAR-SCI pool and write the rotated Hamiltonian.
+
+calculation_sections: [common, model, action]
+action:
+  name: orbit
+  params: ${options.method.orbit}
+
+options:
+  method:
+    orbit:
+      src_fcidump: ${files.fcidump}                      # Original molecular integrals in the orbital basis of the selected pool.
+      dst_optimized: ${files.orbital_output}             # Output model file. A subsequent run can load it through the optimized_basis system.
+      ref_energy: null                                   # Optional energy reference in hartree. Null copies the reference from the source model.

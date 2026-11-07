@@ -1,0 +1,16 @@
+# @package _global_
+model:
+  name: hubbard
+  params: ${options.system.hubbard}
+default_symmetry: u1u1
+
+options:
+  system:
+    hubbard:
+      m: 2                   # Number of columns in the open rectangular lattice.
+      n: 2                   # Number of rows.
+      t: 1.0                 # Hopping amplitude. The nearest-neighbor matrix element is -t.
+      u: 4.0                 # On-site double-occupation energy.
+      mu: 0.0                # Chemical potential multiplying minus the particle number.
+      electron_number: null  # Conserving networks default to half filling (m*n electrons).
+      ref_energy: 0.0        # Reporting reference in lattice energy units.

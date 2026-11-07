@@ -1,0 +1,18 @@
+# @package _global_
+# Train an independent sampling network alongside the neural wavefunction.
+
+calculation_sections: [common, model, network, optimizer, sampling, action]
+action:
+  name: guide
+  params: ${options.method.guide}
+
+sampling: ${network}  # Independent network instance for proposal sampling.
+
+options:
+  method:
+    guide:
+      seed_count: ${sampling_control.seed_count}         # Configurations requested from each sampling network per cycle.
+      target_basis_size: ${sampling_control.target_basis_size} # Target total Hamiltonian neighborhood size, including the seeds.
+      optimizer_steps: ${training.optimizer_steps}       # Wavefunction optimizer steps per outer cycle.
+      unique_seeds: ${sampling_control.unique_seeds}     # Draw unique seeds. False samples with replacement and coalesces duplicates.
+      sampler_steps_per_update: 1                        # Sampling-network updates per wavefunction update.
