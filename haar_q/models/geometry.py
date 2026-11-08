@@ -4,7 +4,9 @@ import dataclasses
 import logging
 import math
 from pathlib import Path
+from typing import Any
 
+import torch
 from pyscf import ao2mo, gto, scf  # type: ignore[import-untyped]
 
 from ..utility.model_dict import model_dict
@@ -58,7 +60,7 @@ def _coordinates(config: ModelConfig) -> list[tuple[str, list[float]]]:
     return atoms
 
 
-def _compute_integrals(config: ModelConfig) -> Integrals:
+def _compute_integrals(config: ModelConfig) -> tuple[Integrals, Any]:
     unit = config.unit.strip().lower()
     if unit not in {"angstrom", "bohr"}:
         raise ValueError("The coordinate unit must be Angstrom or Bohr.")
@@ -120,7 +122,7 @@ def _compute_integrals(config: ModelConfig) -> Integrals:
         n_spin=config.spin,
         nuclear_repulsion=enuc,
         ref_energy=reference,
-    )
+    ), mean_field
 
 
 class Model(IntegralModel):
@@ -129,8 +131,38 @@ class Model(IntegralModel):
     config_t = ModelConfig  # type: ignore[assignment]
 
     def __init__(self, args: ModelConfig) -> None:
-        self.integrals = _compute_integrals(args)
+        self.integrals, self.mean_field = _compute_integrals(args)
         super().__init__(self.integrals)
+
+    def orbital_identity(self) -> dict[str, object]:
+        """Record the ordered nuclei and MO basis in which determinant bits are defined."""
+        mol = self.mean_field.mol
+        return {
+            "atoms": [mol.atom_symbol(i) for i in range(mol.natm)],
+            "coordinates_bohr": torch.from_numpy(mol.atom_coords()),
+            "basis": mol.basis,
+            "charge": mol.charge,
+            "spin": self.n_spins,
+            "mo_coeff": torch.from_numpy(self.mean_field.mo_coeff),
+        }
+
+    def matches_orbital_identity(self, saved: object) -> bool:
+        """Allow a column sign change, which preserves the selected determinant space."""
+        if not isinstance(saved, dict):
+            return False
+        current = self.orbital_identity()
+        if any(saved.get(key) != current[key] for key in ("atoms", "basis", "charge", "spin")):
+            return False
+        for key in ("coordinates_bohr", "mo_coeff"):
+            left, right = saved.get(key), current[key]
+            if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor) or left.shape != right.shape:
+                return False
+            left = left.to(right)
+            if key == "mo_coeff":
+                right = right * torch.where((left * right).sum(dim=0) < 0, -1, 1)
+            if not torch.allclose(left, right, atol=1e-8, rtol=1e-8):
+                return False
+        return True
 
 
 model_dict["geometry"] = Model

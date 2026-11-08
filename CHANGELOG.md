@@ -1,5 +1,21 @@
 # HAAR-Q changelog
 
+## 0.5.0
+
+0.4.0 → 0.5.0 (MINOR). The input gains a multi-state SCI workflow and
+analytical nuclear forces for an isolated root of a fixed determinant space.
+
+- Select `method=excited` and `states.roots` to reuse HAAR selection and
+  train on the combined state probabilities. Each cycle reports energy
+  ranks, excitation gaps and projected residuals in `ROOTS`.
+- Select `method=forces` with a matching closed-shell PySCF geometry,
+  a canonical SCI checkpoint from this version, and a zero-based `forces.root`.
+  `FORCES` gives Cartesian forces in hartree/bohr, including orbital response
+  and nuclear repulsion. See the [supported cases and H₂ example](README.md#excited-states-and-analytical-nuclear-forces).
+- The shared Lanczos routine stops at the basis dimension and can continue
+  in the orthogonal complement after a true breakdown. This can change
+  Ritz values in older SCI calculations that exhausted their Krylov space.
+
 ## 0.4.0
 
 0.3.0 → 0.4.0 (MINOR). Molecular calculations gain a coordinate-based input.

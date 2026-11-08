@@ -22,11 +22,13 @@ class CycleResult:
     basis: int
     energy: float
     ritz: float | None = None
+    roots: tuple[tuple[float, float], ...] = ()
 
 
 class RunReport:
-    def __init__(self, history: TextIO | None) -> None:
+    def __init__(self, history: TextIO | None, roots_file: TextIO | None = None) -> None:
         self.history = history
+        self.roots_file = roots_file
         self.previous_energy: float | None = None
 
     def line(self, text: str, *, comment: bool = True) -> None:
@@ -46,6 +48,17 @@ class RunReport:
             row += f" {result.ritz:19.10f}"
         self.line(row, comment=False)
         self.previous_energy = result.energy
+        if self.roots_file is not None and result.roots:
+            ground = result.roots[0][0]
+            for index, (energy, residual) in enumerate(result.roots):
+                print(
+                    f"{step:7d} {index:5d} {result.basis:8d} {energy:20.12f} {energy - ground:20.12f} {residual:12.4e}",
+                    file=self.roots_file,
+                    flush=True,
+                )
+                logging.info(
+                    "SCI root %d: E=%.12f, gap=%.12f, projected residual=%.4e", index, energy, energy - ground, residual
+                )
 
 
 @contextmanager
@@ -53,13 +66,17 @@ def calculation_report(folder: Path, config: DictConfig, device: str) -> Iterato
     """Scope files and Python logging to one invocation, including a resumed run."""
     folder.mkdir(parents=True, exist_ok=True)
     action = config.action.name
-    is_sci = action in {"haar", "imag"}
+    is_sci = action in {"haar", "imag", "excited"}
     root = logging.getLogger()
     with ExitStack() as stack:
         history = None
         if is_sci or action == "vmc":
             history = stack.enter_context((folder / "OSZICAR").open("a", encoding="utf-8"))
-        report = RunReport(history)
+        roots_file = None
+        if action == "excited":
+            roots_file = stack.enter_context((folder / "ROOTS").open("a", encoding="utf-8"))
+            print("# CYCLE  ROOT  BASIS  TOTAL_ENERGY  GAP_FROM_ROOT_0  PROJECTED_RESIDUAL", file=roots_file)
+        report = RunReport(history, roots_file)
         detail = logging.FileHandler(folder / "OUTCAR", mode="a", encoding="utf-8")
         stack.callback(detail.close)
         detail.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s", "%Y-%m-%d %H:%M:%S"))
@@ -87,6 +104,8 @@ def calculation_report(folder: Path, config: DictConfig, device: str) -> Iterato
 
             warnings.showwarning = record_warning
             title = "HAAR-SCI" if is_sci else action.upper()
+            if action == "excited":
+                title = "HAAR-SCI (excited states)"
             if action == "vmc":
                 guided = OmegaConf.select(config, "action.params.hamiltonian_guided", default=True)
                 title += " (Hamiltonian-guided)" if guided else " (legacy estimator)"
@@ -102,11 +121,18 @@ def calculation_report(folder: Path, config: DictConfig, device: str) -> Iterato
                     else "Hamiltonian input units"
                 )
                 report.line(f"Energies in {unit}")
+                if roots_file is not None:
+                    print(
+                        f"# Energies, gaps and residuals in {unit}; zero-based roots ordered within this cycle.",
+                        file=roots_file,
+                    )
                 energy_note = (
                     "E is the fitted network energy in the selected basis. E_RITZ is the lowest Lanczos target."
                     if is_sci
                     else "E is the energy returned by the last optimizer step of this cycle."
                 )
+                if action == "excited":
+                    energy_note = "E is the sampling-network energy. E_RITZ is the lowest selected CI energy. See ROOTS for excitation gaps."
                 for note in (energy_note, "dE is E minus the preceding cycle's E in this invocation."):
                     print(f"# {note}", file=history)
                     logging.info("%s", note)

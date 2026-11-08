@@ -1,5 +1,5 @@
 include AGENTS.md CHANGELOG.md CONTRIBUTING.md input.yaml
 recursive-include haar_q/conf *.yaml
 recursive-include docs *.md
-recursive-include examples *.py *.yaml *.FCIDUMP *.wavefunction
+recursive-include examples *.py *.yaml *.xyz *.FCIDUMP *.wavefunction
 recursive-include tests *.py

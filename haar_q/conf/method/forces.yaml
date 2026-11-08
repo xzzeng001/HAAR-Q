@@ -1,0 +1,14 @@
+# @package _global_
+# Evaluate the analytical nuclear force of an isolated fixed-space SCI root.
+calculation_sections: [common, model, action]
+action:
+  name: forces
+  params: ${options.method.forces}
+
+forces:
+  root: 0
+
+options:
+  method:
+    forces:
+      root: ${forces.root}  # Energy-ordered root in the checkpoint's determinant space, starting at zero.

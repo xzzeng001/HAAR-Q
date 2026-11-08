@@ -50,6 +50,8 @@ model, network and optimizer it needs.
 | --- | --- | --- |
 | `vmc` | Optimizes the neural wavefunction on sampled and Hamiltonian-connected configurations. The legacy sampled estimator is also available. | A model, a sampling-capable network and an optimizer |
 | `haar` | Expands a selected CI space, computes Ritz states with Lanczos, and fits the network for the next cycle. | A model and a network with unique sampling; the checkpoint stores the pool and requested Ritz states |
+| `excited` | Solves for the lowest states on each HAAR-selected space and fits the network to their combined probability. | Set `states.roots`, counting the ground state. The `ROOTS` file lists total energies, excitation gaps and projected residuals. |
+| `forces` | Computes the analytical nuclear force on a chosen fixed-space CI energy surface. | A matching closed-shell geometry and a canonical `haar` or `excited` checkpoint from v0.5.0 or later. |
 | `guide` | Trains a separate sampling network from local-energy fluctuations alongside the wavefunction. | The method creates a second network using the selected ansatz. |
 | `pretrain` | Fits the network to known wavefunction amplitudes. | A Torch file containing packed configurations and their matching amplitudes as a pair of tensors |
 | `orbit` | Diagonalizes the spatial one-particle density matrix and writes a Hamiltonian in the natural-orbital basis. | A HAAR-SCI pool and the corresponding geometry or matching FCIDUMP |
@@ -75,7 +77,7 @@ diagonal elements. The following choices are available for the sampling network.
 The `system` selector supplies the default symmetry and `ansatz` supplies
 the sampling mode. For example, `system=ising ansatz=transformers` selects
 `transformers/0`, while `system=hubbard ansatz=mps` selects an MPS with
-replacement sampling. Both SCI methods require a network with unique generation.
+replacement sampling. The SCI sampling methods require a network with unique generation.
 
 **Python interfaces.** `haar_q.plugins.pyscf.Solver.kernel` accepts one- and
 two-electron integral arrays and electron counts for a HAAR-SCI calculation.
@@ -191,6 +193,8 @@ in the launch directory. Each invocation uses its own timestamped directory.
 | Output | Contents |
 | --- | --- |
 | `OSZICAR` | Compact convergence history for VMC and HAAR-SCI. Use this file to follow cycle energies and configuration counts. |
+| `ROOTS` | In an `excited` run, one row per cycle and state with energy rank, basis size, total energy, gap above root 0 and projected residual norm. |
+| `FORCES` | In a `forces` run, the selected root's total energy and one Cartesian force vector per atom, in input atom order and hartree/bohr. |
 | `OUTCAR` | Human-readable run information, settings, detailed iteration logs and diagnostics. |
 | `data.pth` | Latest checkpoint with the network, optimizer, and progress. |
 | `events.out.tfevents.*` | TensorBoard metrics, including VMC energies for individual local optimization steps. |
@@ -214,7 +218,7 @@ English comments for its parameters.
 
 | Selector | Choices | Parameter reference |
 | --- | --- | --- |
-| `method` | `vmc`, `haar`, `guide`, `pretrain`, `pert`, `chop_imag`, `orbit`, `haar_with_orbit` | [Calculation methods](haar_q/conf/method) |
+| `method` | `vmc`, `haar`, `excited`, `forces`, `guide`, `pretrain`, `pert`, `chop_imag`, `orbit`, `haar_with_orbit` | [Calculation methods](haar_q/conf/method) |
 | `system` | `fcidump`, `geometry`, `hubbard`, `ising`, `openfermion`, `optimized_basis` | [Hamiltonians and lattice couplings](haar_q/conf/system) |
 | `ansatz` | `mlp`, `transformers`, `mps` | [Network architectures](haar_q/conf/ansatz) |
 | `optim` | `adam`, `lbfgs` | [Optimizers](haar_q/conf/optim) |
@@ -332,6 +336,62 @@ nuclear repulsion. The separate `E` column reports the fitted network energy.
 Start a fresh run when changing the molecule, basis, charge or spin.
 When resuming a calculation or using its SCI pool, use the same orbital
 basis and retain any optimized-basis files referenced by the checkpoint.
+
+#### Excited states and analytical nuclear forces
+
+Select `method=excited` and set `states.roots` to the **total number of
+states**, including root 0. Each cycle samples and expands the determinant
+space using the usual HAAR settings. The solver then diagonalizes the
+projected Hamiltonian for the lowest requested states. The network learns
+from the sum of their probabilities. Each state's signed or complex
+coefficients are saved separately in `data.pth` under `haar.excited`.
+
+The `GAP_FROM_ROOT_0` column in `ROOTS` gives the vertical excitation energy
+in the model's energy units (hartree for molecular inputs). Roots are ordered
+by energy within the chosen symmetry sector at each cycle. A fixed spin
+projection can contain states of different total spin. Energy rank alone
+does not track a state's physical character across a crossing. The residual
+tests convergence **within the selected space**. To assess configuration
+selection error, repeat with a larger space.
+
+The following PowerShell example uses H₂ at 0.74 Å in STO-3G. All four
+determinants with one alpha and one beta electron fit in the example's
+selected space. Use the same molecular settings in both commands.
+
+```powershell
+$sciRun = 'outputs/h2-states-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+$molecule = @('system=geometry', 'geometry.xyz_file=examples/h2/H2.xyz', 'geometry.unit=Angstrom', 'geometry.basis=sto-3g', 'geometry.charge=0', 'geometry.spin=0')
+python -m haar_q -i input.yaml @molecule method=excited states.roots=4 sampling_control.seed_count=4 common.max_relative_step=1 "hydra.run.dir=$sciRun"
+python -m haar_q -i input.yaml @molecule method=forces forces.root=1 "common.parent_path=$sciRun/data.pth" "hydra.run.dir=$sciRun/force-1"
+Get-Content "$sciRun/ROOTS", "$sciRun/force-1/FORCES"
+```
+
+For this full-space H₂ example the first gap is 0.6065104775 hartree.
+That root is the zero-spin-projection component of a triplet. The next
+root is a singlet at 0.9689314015 hartree above the ground state. These
+spin assignments were checked independently for this example.
+
+Use `forces.root=0` for the ground state. The force action reads the last
+selected determinant set, solves for the chosen eigenstate and contracts
+its reduced density matrices with analytical derivatives. It includes
+nuclear repulsion, AO integral and overlap derivatives, and the response of
+the canonical RHF orbitals. Each component is `F = -dE/dR` in hartree/bohr.
+The derivative holds the determinant labels fixed. A fresh stochastic
+selection at a displaced geometry can change those labels and the resulting
+energy surface. [Selected-CI gradient theory](https://doi.org/10.1021/acs.jctc.2c01062)
+
+The force implementation supports isolated states in closed-shell,
+all-electron canonical RHF orbitals. The checkpoint must match the input
+nuclei and orbital basis. FCIDUMP alone lacks nuclear derivatives.
+Rotated-orbital and open-shell checkpoints are unsupported. Canonical orbital
+or target-state energy separations below `1e-7` hartree are rejected,
+including the degenerate π orbitals of linear N₂. The in-memory force
+implementation supports up to 32 spatial orbitals and requires the number
+of distinct alpha strings times the number of distinct beta strings to be
+at most 1,000,000. For selected spaces above 128 determinants, the shared
+matrix-free eigensolver accepts up to one fifth of the dimension as its
+root count. Force calculations also request the next root when available
+to test whether the target is isolated.
 
 #### Hamiltonian-guided VMC
 

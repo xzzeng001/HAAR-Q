@@ -1,7 +1,7 @@
 # HAAR-Q calculation input. Launch with python -m haar_q -i input.yaml
 # Edit the four choices below, or override any choice on the command line.
 defaults:
-  - method: vmc        # vmc, haar, guide, pretrain, pert, chop_imag, orbit, haar_with_orbit
+  - method: vmc        # vmc, haar, excited, forces, guide, pretrain, pert, chop_imag, orbit, haar_with_orbit
   - system: fcidump    # fcidump, geometry (PySCF), hubbard, ising, openfermion, optimized_basis
   - ansatz: mlp        # mlp, transformers, mps (lattice models only)
   - optim: adam        # adam, lbfgs
@@ -43,6 +43,12 @@ sampling_control:
 training:
   optimizer_steps: 10              # Wavefunction updates per cycle for VMC, guide and SCI.
   learning_rate: 0.01              # Shared initial step size of the selected optimizer.
+
+states:                            # method=excited: lowest states on the selected determinant space.
+  roots: 2                         # Total number of roots including ground state 0.
+  residual_tolerance: 1.0e-8        # Maximum projected eigenpair residual in Hamiltonian energy units.
+forces:                            # method=forces: fixed-space nuclear forces for a geometry SCI checkpoint.
+  root: 0                          # Zero-based energy rank. Set common.parent_path to the matching checkpoint.
 
 # Module-specific settings can coexist here. Only selected modules participate in the job.
 options:

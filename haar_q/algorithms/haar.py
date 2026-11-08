@@ -131,17 +131,20 @@ class _DynamicLanczos:
         alpha.append((w.conj() @ v[-1]).real)
         yield (alpha, beta, v)
         w = w - alpha[-1] * v[-1]
-        while True:
+        while len(v) < len(self.configs):
             norm_w = torch.linalg.norm(w)
             beta.append(norm_w)
             if norm_w < self.threshold or (len(v) % self.period == 0):
                 # Generate a random vector to continue the Lanczos process
                 random_v = torch.randn_like(v[-1])
-                nonzero = torch.zeros_like(random_v, dtype=torch.bool)
-                for prev_v in v:
-                    prev_v_device = prev_v.to(device=random_v.device)
-                    nonzero = torch.logical_or(nonzero, prev_v_device.abs() > self.threshold)
-                random_v = torch.where(nonzero, random_v, 0)
+                if norm_w < self.threshold:
+                    beta[-1] = torch.zeros_like(norm_w)
+                else:
+                    # Preserve the support of the current Krylov basis for scheduled restarts.
+                    support = torch.zeros_like(random_v, dtype=torch.bool)
+                    for prev_v in v:
+                        support |= prev_v.to(device=random_v.device).abs() > self.threshold
+                    random_v = torch.where(support, random_v, 0)
                 # Orthogonalize the random vector against all previous vectors
                 for prev_v in v:
                     prev_v_device = prev_v.to(device=random_v.device)
@@ -404,6 +407,14 @@ class HaarConfig:
             pool_configs, pool_psi = data["haar"]["pool"]
             data["haar"]["pool"] = (pool_configs.to(device=context.device), pool_psi.to(device=context.device))
 
+        if runtime_config.model.name == "geometry":
+            from ..models.geometry import Model as GeometryModel
+
+            if isinstance(model, GeometryModel):
+                data["haar"]["canonical_geometry"] = model.orbital_identity()
+        else:
+            data["haar"].pop("canonical_geometry", None)
+
         writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder())  # type: ignore[no-untyped-call]
 
         while True:
@@ -431,6 +442,7 @@ class HaarConfig:
             target_energy: torch.Tensor
             lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
+            excited = runtime_config.action.name == "excited"
             for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
@@ -442,7 +454,7 @@ class HaarConfig:
                 single_extend=self.krylov_single_extend,
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
-                period=self.krylov_period,
+                period=max(self.krylov_iteration + 1, self.krylov_period) if excited else self.krylov_period,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info(
@@ -452,6 +464,17 @@ class HaarConfig:
                 writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"])  # type: ignore[no-untyped-call]
                 data["haar"]["lanczos"] += 1
 
+            root_observables: tuple[tuple[float, float], ...] = ()
+            if excited:
+                from .selected_states import solve_selected_states
+
+                lanczos_results, residuals = solve_selected_states(
+                    model, configs, runtime_config.states.roots, runtime_config.states.residual_tolerance
+                )
+                target_energy, configs, original_psi = lanczos_results[0]
+                root_observables = tuple(
+                    (root[0].item(), residual) for root, residual in zip(lanczos_results, residuals)
+                )
             data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
 
             target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
@@ -583,7 +606,7 @@ class HaarConfig:
             data["haar"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            result = CycleResult(seeds, len(configs), final_energy.item(), target_energy.item())
+            result = CycleResult(seeds, len(configs), final_energy.item(), target_energy.item(), root_observables)
             context.save(data, data["haar"]["global"], result=result)
             logging.info("Checkpoint successfully saved")
 
@@ -592,3 +615,4 @@ class HaarConfig:
 
 action_dict["haar"] = HaarConfig
 action_dict["imag"] = HaarConfig
+action_dict["excited"] = HaarConfig

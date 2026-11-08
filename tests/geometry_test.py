@@ -63,6 +63,18 @@ def test_xyz_atom_count_must_match_its_coordinates(tmp_path: Path) -> None:
         geometry.Model(geometry.ModelConfig(xyz_file=xyz))
 
 
+def test_orbital_identity_allows_phase_but_detects_different_basis_or_geometry() -> None:
+    with lib.with_omp_threads(1):
+        model = geometry.Model(geometry.ModelConfig(atoms="H 0 0 0; H 0 0 0.74"))
+    saved = model.orbital_identity()
+    coeff, coords = saved["mo_coeff"], saved["coordinates_bohr"]
+    assert isinstance(coeff, torch.Tensor) and isinstance(coords, torch.Tensor)
+    assert model.matches_orbital_identity({**saved, "mo_coeff": coeff * torch.tensor([-1, 1])})
+    assert not model.matches_orbital_identity({**saved, "mo_coeff": coeff.flip(1)})
+    assert not model.matches_orbital_identity({**saved, "coordinates_bohr": coords + 0.01})
+    assert not model.matches_orbital_identity(None)
+
+
 @pytest.mark.parametrize(("charge", "spin", "message"), [(0, 0, "incompatible with spin"), (-2, 1, "capacity")])
 def test_requested_spin_sector_must_exist(charge: int, spin: int, message: str) -> None:
     with pytest.raises(ValueError, match=message):

@@ -1,0 +1,12 @@
+# @package _global_
+# Use HAAR selection and training controls, then solve for all requested roots in the selected space.
+defaults:
+  - haar
+  - _self_
+
+action:
+  name: excited
+calculation_sections: [common, model, network, optimizer, action, states]
+states:
+  roots: 2                     # Lowest roots, including root 0 (ground state in the selected sector).
+  residual_tolerance: 1.0e-8   # Maximum ||H_SS c - E c|| in Hamiltonian energy units.

@@ -24,7 +24,7 @@ def preview(
 
 
 @pytest.mark.parametrize(
-    "method", ["vmc", "haar", "guide", "pretrain", "pert", "chop_imag", "orbit", "haar_with_orbit"]
+    "method", ["vmc", "haar", "excited", "forces", "guide", "pretrain", "pert", "chop_imag", "orbit", "haar_with_orbit"]
 )
 def test_single_method_selector_composes_its_complete_action(
     method: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
@@ -41,7 +41,7 @@ def test_single_method_selector_composes_its_complete_action(
     assert ("sampling" in job) == (method == "guide")
     if method == "guide":
         assert job.sampling == job.network
-    if method in {"pert", "orbit", "chop_imag"}:
+    if method in {"pert", "orbit", "chop_imag", "forces"}:
         assert "network" not in job and "optimizer" not in job
     assert "options" not in job
     assert not list(tmp_path.iterdir())

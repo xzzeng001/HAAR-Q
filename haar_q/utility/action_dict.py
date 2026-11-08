@@ -50,6 +50,7 @@ _PARAMETER_NAMES = {
     "vmc": _VMC_PARAMETERS,
     "guide": {**_VMC_PARAMETERS, "sampler_steps_per_update": "dist_step"},
     "haar": _HAAR_PARAMETERS,
+    "excited": _HAAR_PARAMETERS,
     "haar_with_orbit": _HAAR_PARAMETERS,
     "imag": _HAAR_PARAMETERS,
 }
@@ -59,7 +60,7 @@ def create_action(action: omegaconf.DictConfig) -> ActionProto:
     """Construct the selected action from composed YAML or a PySCF solver configuration."""
     name = action.name
     if name not in action_dict:
-        module = "haar" if name == "imag" else name
+        module = "haar" if name in {"imag", "excited"} else name
         importlib.import_module(f"haar_q.algorithms.{module}")
     data = omegaconf.OmegaConf.to_container(action.params, resolve=True)
     if not isinstance(data, dict):
@@ -73,7 +74,7 @@ def create_action(action: omegaconf.DictConfig) -> ActionProto:
         return dacite.from_dict(
             data_class=action_dict[name],
             data=data,
-            config=dacite.Config(cast=DACITE_CAST, strict=name in {"vmc", "haar", "imag"}),
+            config=dacite.Config(cast=DACITE_CAST, strict=name in {"vmc", "haar", "imag", "excited"}),
         )
     except dacite.UnexpectedDataError as exc:
         keys = ", ".join(sorted(exc.keys))
