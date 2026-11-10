@@ -107,6 +107,7 @@ class _PyscfRuntimeContext(RuntimeContext):
     ) -> None:
         super().__init__(**kwargs)
         self._model_instance: ModelProto = model_instance
+        self.configure_model_devices(model_instance)
         self._folder_path: pathlib.Path = folder_path
 
     def folder(self) -> pathlib.Path:
@@ -402,6 +403,7 @@ class Solver:
                 random_seed=rt.random_seed,
                 checkpoint_interval=rt.checkpoint_interval,
                 device=rt.device,
+                gpu_devices=rt.gpu_devices,
                 dtype=rt.dtype,
                 max_absolute_step=rt.max_absolute_step,
                 max_relative_step=rt.max_relative_step,

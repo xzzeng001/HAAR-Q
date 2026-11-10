@@ -45,9 +45,24 @@ class RuntimeContext:
     max_absolute_step: int | None = None
     # The maximum relative step for the process, leave empty to loop forever
     max_relative_step: int | None = None
+    # CUDA ordinals visible to this process. The first device owns the model and checkpoints.
+    gpu_devices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         self._report: RunReport | None = None
+        if self.gpu_devices:
+            if self.device.type != "cuda":
+                raise ValueError("common.gpu_devices requires common.device=cuda or cuda:<primary>.")
+            if any(type(i) is not int or i < 0 for i in self.gpu_devices):
+                raise ValueError("common.gpu_devices must contain nonnegative integer CUDA ordinals.")
+            if len(set(self.gpu_devices)) != len(self.gpu_devices):
+                raise ValueError("common.gpu_devices must contain distinct CUDA ordinals.")
+            if self.device.index is not None and self.device.index != self.gpu_devices[0]:
+                raise ValueError("common.device must match the first entry in common.gpu_devices.")
+            count = torch.cuda.device_count()
+            if max(self.gpu_devices) >= count:
+                raise ValueError(f"Requested common.gpu_devices={self.gpu_devices} but only {count} GPUs are visible.")
+            self.device = torch.device("cuda", self.gpu_devices[0])
         if isinstance(self.dtype, str):
             match self.dtype:
                 case "bfloat16":
@@ -72,7 +87,8 @@ class RuntimeContext:
     @contextmanager
     def reporting(self, config: omegaconf.DictConfig) -> Iterator[None]:
         """Enable run files and progress output for this command-line calculation."""
-        with calculation_report(self.folder(), config, str(self.device)) as report:
+        devices = ", ".join(f"cuda:{index}" for index in self.gpu_devices) or str(self.device)
+        with calculation_report(self.folder(), config, devices) as report:
             self._report = report
             try:
                 yield
@@ -84,6 +100,12 @@ class RuntimeContext:
         Setup the runtime environment, and returns the loaded checkpoint data (if any).
         """
         logging.info("Log directory: %s", self.folder())
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested but is unavailable. Check the NVIDIA driver and CUDA-enabled PyTorch."
+            )
+        if self.gpu_devices:
+            logging.info("Selected CUDA devices: %s (primary %s)", self.gpu_devices, self.device)
         self.folder().mkdir(parents=True, exist_ok=True)
 
         logging.info("Disabling PyTorch's default gradient computation")
@@ -109,6 +131,12 @@ class RuntimeContext:
             torch.set_rng_state(data["random"]["host"])
             if data["random"]["device_type"] == self.device.type:
                 load_random_engine_state(data["random"]["device"], self.device)
+                workers = data["random"].get("cuda_workers", [])
+                if len(workers) == len(self.gpu_devices[1:]):
+                    for index, state in zip(self.gpu_devices[1:], workers):
+                        torch.cuda.set_rng_state(state, index)
+                elif self.gpu_devices[1:]:
+                    logging.info("Worker RNG states unavailable for this GPU count; using the current worker states.")
             else:
                 logging.info("Skipping loading random engine state for device since the device type does not match")
         else:
@@ -126,6 +154,8 @@ class RuntimeContext:
             "device": dump_random_engine_state(self.device),
             "device_type": self.device.type,
         }
+        if len(self.gpu_devices) > 1:
+            data["random"]["cuda_workers"] = [torch.cuda.get_rng_state(i) for i in self.gpu_devices[1:]]
         folder = self.folder()
         latest = folder / "data.pth"
         with tempfile.TemporaryDirectory(dir=folder, prefix=".checkpoint-") as staging:
@@ -175,8 +205,21 @@ class RuntimeContext:
         )
         # Then create the model
         model: ModelProto = model_t(model_param)
+        self.configure_model_devices(model)
         logging.info("Physical model loaded successfully")
         return model
+
+    def configure_model_devices(self, model: ModelProto) -> None:
+        """Attach the selected CUDA devices to a newly constructed native model."""
+        if len(self.gpu_devices) > 1:
+            from ..hamiltonian import Hamiltonian
+            from .parallel_hamiltonian import ParallelHamiltonian
+
+            hamiltonian = getattr(model, "hamiltonian", None)
+            if not isinstance(hamiltonian, Hamiltonian):
+                raise ValueError("Multi-GPU matvecs require a model with a native HAAR-Q Hamiltonian.")
+            if not isinstance(hamiltonian, ParallelHamiltonian):
+                setattr(model, "hamiltonian", ParallelHamiltonian(hamiltonian, self.gpu_devices))
 
     def create_network(
         self,
@@ -213,6 +256,15 @@ class RuntimeContext:
         logging.info("Moving network to device: %s", self.device)
         assert not isinstance(self.dtype, str)
         network = network.to(device=self.device, dtype=self.dtype)
+
+        family = network_name.split("/")[0]
+        if len(self.gpu_devices) > 1 and family in {"mlp", "transformers", "mps"}:
+            from .parallel_wavefunction import ParallelWavefunction
+
+            logging.info("Evaluating %s amplitude batches across GPUs %s", family, self.gpu_devices)
+            return typing.cast(
+                NetworkProto, ParallelWavefunction(network, self.gpu_devices, transformer=family == "transformers")
+            )
 
         logging.info("Compiling the network")
         network = torch.jit.script(network)  # type: ignore[assignment]

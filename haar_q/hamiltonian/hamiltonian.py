@@ -16,22 +16,10 @@ class Hamiltonian:
     _hamiltonian_module: dict[tuple[str, int, int], object] = {}
 
     @classmethod
-    def _set_torch_cuda_arch_list(cls) -> None:
-        """
-        Set the CUDA architecture list for PyTorch to use when compiling the PyTorch extensions.
-        """
-        if not torch.cuda.is_available():
-            return
-        if "TORCH_CUDA_ARCH_LIST" in os.environ:
-            return
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "native"
-
-    @classmethod
     def _load_module(cls, device_type: str = "declaration", n_qubytes: int = 0, particle_cut: int = 0) -> object:
         """
         Load the Hamiltonian PyTorch extension module for the given device type, number of qubytes, and particle cut or just load the declaration module.
         """
-        cls._set_torch_cuda_arch_list()
         if device_type != "declaration":
             cls._load_module("declaration", n_qubytes, particle_cut)  # Ensure the declaration module is loaded first
         key = (device_type, n_qubytes, particle_cut)
@@ -151,6 +139,8 @@ class Hamiltonian:
         torch.Tensor
             A tensor of shape [batch_size_j] representing the output amplitudes on the given configurations.
         """
+        if not len(configs_i) or not len(configs_j) or not len(self.site):
+            return psi_i.new_zeros(len(configs_j))
         self._prepare_data(configs_i.device)
         _apply_within = getattr(
             self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
@@ -188,6 +178,10 @@ class Hamiltonian:
             The resulting configurations after applying the Hamiltonian, only the first `count_selected` configurations are guaranteed to be returned.
             The order of the configurations is guaranteed to be sorted by estimated psi for the remaining configurations.
         """
+        if count_selected < 0:
+            raise ValueError("count_selected must be nonnegative.")
+        if count_selected == 0 or not len(configs_i) or not len(self.site):
+            return configs_i[:0]
         if configs_exclude is None:
             configs_exclude = configs_i
         self._prepare_data(configs_i.device)
@@ -199,6 +193,27 @@ class Hamiltonian:
             configs_i, torch.view_as_real(psi_i), count_selected, self.site, self.kind, self.coef, configs_exclude
         )
         return configs_j
+
+    def _relative_candidate_pool(
+        self,
+        configs: torch.Tensor,
+        psi: torch.Tensor,
+        excluded: torch.Tensor,
+        *,
+        count_selected: int,
+    ) -> torch.Tensor:
+        """Return packed (float64 path weight, determinant bytes) rows before deduplication."""
+        self._prepare_data(configs.device)
+        module = self._load_module(configs.device.type, configs.size(1), self.particle_cut)
+        return getattr(module, "relative_candidate_pool")(
+            configs,
+            torch.view_as_real(psi),
+            min(count_selected, len(configs) * len(self.site)),
+            self.site,
+            self.kind,
+            self.coef,
+            excluded,
+        )
 
     def list_relative(
         self,

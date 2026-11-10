@@ -1,14 +1,38 @@
-#include <ATen/cuda/Exceptions.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <algorithm>
+#include <limits>
+#include <vector>
 #include <cuda_runtime.h>
-#include <curand_kernel.h>
+#include <cuda/atomic>
 #include <thrust/sort.h>
 #include <torch/extension.h>
 
 namespace haar_q_hamiltonian_cuda {
 
 constexpr torch::DeviceType device = torch::kCUDA;
+
+// Assign more lanes to terms when only a few determinants are present. In a
+// large basis, each warp processes a row of terms for one determinant.
+std::pair<dim3, dim3> term_batch_launch(std::int64_t terms, std::int64_t batch, int device_id) {
+    cudaDeviceProp prop;
+    C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    unsigned int y = 1;
+    while (y < 8 && y < batch) {
+        y *= 2;
+    }
+    unsigned int x = 256 / y;
+    while (x > 1 && terms <= x / 2 && y < batch) {
+        x /= 2;
+        y *= 2;
+    }
+    const auto needed_x = terms ? 1 + (terms - 1) / x : 1;
+    const auto needed_y = batch ? 1 + (batch - 1) / y : 1;
+    TORCH_CHECK(needed_x <= prop.maxGridSize[0], "Hamiltonian term count exceeds the CUDA x-grid limit.");
+    const auto blocks_y = std::min<std::int64_t>(needed_y, prop.maxGridSize[1]);
+    return {dim3(static_cast<unsigned int>(needed_x), static_cast<unsigned int>(blocks_y)), dim3(x, y)};
+}
 
 // Configuration data is bit-packed (8 sites per byte).
 // Lexicographic comparison of the packed byte arrays defines the configuration ordering.
@@ -158,10 +182,13 @@ __global__ void apply_within_kernel_interface(
     const std::array<std::uint8_t, n_qubytes>* result_configs, // result_batch_size
     std::array<double, 2>* result_psi
 ) {
-    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (term_index < term_number && batch_index < batch_size) {
+    const std::int64_t term_index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (term_index >= term_number) {
+        return;
+    }
+    const auto batch_stride = static_cast<std::int64_t>(gridDim.y) * blockDim.y;
+    for (std::int64_t batch_index = static_cast<std::int64_t>(blockIdx.y) * blockDim.y + threadIdx.y;
+         batch_index < batch_size; batch_index += batch_stride) {
         apply_within_kernel<max_op_number, n_qubytes, particle_cut>(
             /*term_index=*/term_index,
             /*batch_index=*/batch_index,
@@ -196,9 +223,6 @@ auto apply_within_interface(
     at::cuda::CUDAGuard cuda_device_guard(device_id);
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -259,9 +283,7 @@ auto apply_within_interface(
     );
     auto sorted_result_psi = torch::zeros({result_batch_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
 
-    auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
-    auto num_blocks =
-        dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
+    const auto [num_blocks, threads_per_block] = term_batch_launch(term_number, batch_size, device_id);
     apply_within_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
@@ -274,188 +296,86 @@ auto apply_within_interface(
         /*result_configs=*/reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(sorted_result_configs.data_ptr()),
         /*result_psi=*/reinterpret_cast<std::array<double, 2>*>(sorted_result_psi.data_ptr())
     );
-    AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     auto result_psi = torch::zeros_like(sorted_result_psi);
     result_psi.index_put_({result_sort_index}, sorted_result_psi);
     return result_psi;
 }
 
-// Implement a spinlock using atomicCAS for acquisition and nanosleep for backoff.
-__device__ void _mutex_lock(int* mutex) {
-    // I don't know why we need to wait for these periods of time, but the examples in the CUDA documentation are written this way.
-    // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#nanosleep-example
-    unsigned int ns = 8;
-    while (atomicCAS(mutex, 0, 1) == 1) {
-        __nanosleep(ns);
-        if (ns < 256) {
-            ns *= 2;
+// A record may have an odd byte stride. Read its packed weight only while its
+// node is locked. The separate aligned root cutoff provides a cheap atomic
+// rejection test for paths that cannot improve a full heap.
+template<typename Row>
+__device__ double path_weight(const Row& record) {
+    double weight;
+    for (std::size_t i = 0; i < sizeof(double); ++i) {
+        reinterpret_cast<std::uint8_t*>(&weight)[i] = record[i];
+    }
+    return weight;
+}
+
+__device__ void lock_heap_node(int* address) {
+    cuda::atomic_ref<int, cuda::thread_scope_device> lock(*address);
+    unsigned int delay = 8;
+    while (true) {
+        int expected = 0;
+        if (lock.compare_exchange_weak(expected, 1, cuda::std::memory_order_acquire, cuda::std::memory_order_relaxed)) {
+            return;
+        }
+        __nanosleep(delay);
+        if (delay < 256) {
+            delay *= 2;
         }
     }
 }
 
-__device__ void mutex_lock(int* mutex) {
-    _mutex_lock(mutex);
-    __threadfence();
+__device__ void unlock_heap_node(int* address) {
+    cuda::atomic_ref<int, cuda::thread_scope_device>(*address).store(0, cuda::std::memory_order_release);
 }
 
-__device__ void mutex_lock(int* mutex1, int* mutex2) {
-    _mutex_lock(mutex1);
-    _mutex_lock(mutex2);
-    __threadfence();
-}
-
-__device__ void _mutex_unlock(int* mutex) {
-    atomicExch(mutex, 0);
-}
-
-__device__ void mutex_unlock(int* mutex) {
-    __threadfence();
-    _mutex_unlock(mutex);
-}
-
-__device__ void mutex_unlock(int* mutex1, int* mutex2) {
-    __threadfence();
-    _mutex_unlock(mutex1);
-    _mutex_unlock(mutex2);
-}
-
-// Concurrent heap for Top-K selection.
-// Fine-grained locking selects the K largest values from concurrent GPU inputs:
-// each node has its own Mutex, rather than locking the entire heap.
-// Sifting down uses lock coupling: lock the current node, lock its child,
-// compare/swap, then release the current node.
-template<typename T, typename Less = thrust::less<T>>
-__device__ void add_into_heap(T* heap, int* mutex, std::int64_t heap_size, const T& value) {
-    auto less = Less();
-    std::int64_t index = 0;
-    if (less(value, heap[index])) {
-    } else {
-        mutex_lock(&mutex[index]);
-        if (less(value, heap[index])) {
-            mutex_unlock(&mutex[index]);
-        } else {
-            while (true) {
-                // Current lock status: only mutex[index] is locked
-                // Calculate the indices of the left and right children
-                std::int64_t left = (index << 1) + 1;
-                std::int64_t right = (index << 1) + 2;
-                std::int64_t left_present = left < heap_size;
-                std::int64_t right_present = right < heap_size;
-                if (left_present) {
-                    if (right_present) {
-                        // Both left and right children are present
-                        if (less(value, heap[left])) {
-                            if (less(value, heap[right])) {
-                                // Both children are greater than the value, break
-                                break;
-                            } else {
-                                // The left child is greater than the value, treat it as if only the right child is present
-                                mutex_lock(&mutex[right]);
-                                if (less(value, heap[right])) {
-                                    mutex_unlock(&mutex[right]);
-                                    break;
-                                } else {
-                                    heap[index] = heap[right];
-                                    mutex_unlock(&mutex[index]);
-                                    index = right;
-                                }
-                            }
-                        } else {
-                            if (less(value, heap[right])) {
-                                // The right child is greater than the value, treat it as if only the left child is present
-                                mutex_lock(&mutex[left]);
-                                if (less(value, heap[left])) {
-                                    mutex_unlock(&mutex[left]);
-                                    break;
-                                } else {
-                                    heap[index] = heap[left];
-                                    mutex_unlock(&mutex[index]);
-                                    index = left;
-                                }
-                            } else {
-                                mutex_lock(&mutex[left], &mutex[right]);
-                                if (less(heap[left], heap[right])) {
-                                    if (less(value, heap[left])) {
-                                        mutex_unlock(&mutex[left], &mutex[right]);
-                                        break;
-                                    } else {
-                                        heap[index] = heap[left];
-                                        mutex_unlock(&mutex[index], &mutex[right]);
-                                        index = left;
-                                    }
-                                } else {
-                                    if (less(value, heap[right])) {
-                                        mutex_unlock(&mutex[left], &mutex[right]);
-                                        break;
-                                    } else {
-                                        heap[index] = heap[right];
-                                        mutex_unlock(&mutex[index], &mutex[left]);
-                                        index = right;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Only the left child is present
-                        if (less(value, heap[left])) {
-                            break;
-                        } else {
-                            mutex_lock(&mutex[left]);
-                            if (less(value, heap[left])) {
-                                mutex_unlock(&mutex[left]);
-                                break;
-                            } else {
-                                heap[index] = heap[left];
-                                mutex_unlock(&mutex[index]);
-                                index = left;
-                            }
-                        }
-                    }
-                } else {
-                    if (right_present) {
-                        // Only the right child is present
-                        if (less(value, heap[right])) {
-                            break;
-                        } else {
-                            mutex_lock(&mutex[right]);
-                            if (less(value, heap[right])) {
-                                mutex_unlock(&mutex[right]);
-                                break;
-                            } else {
-                                heap[index] = heap[right];
-                                mutex_unlock(&mutex[index]);
-                                index = right;
-                            }
-                        }
-                    } else {
-                        // No children are present
-                        break;
-                    }
-                }
+template<typename Row>
+__device__ void add_into_heap(Row* heap, int* mutex, double* root_weight, std::int64_t size, const Row& value, double weight) {
+    cuda::atomic_ref<double, cuda::thread_scope_device> cutoff(*root_weight);
+    if (!(weight > cutoff.load(cuda::std::memory_order_relaxed))) {
+        return;
+    }
+    std::int64_t node = 0;
+    lock_heap_node(&mutex[node]);
+    if (!(weight > path_weight(heap[node]))) {
+        unlock_heap_node(&mutex[node]);
+        return;
+    }
+    while (node < size / 2) {
+        const auto left = 2 * node + 1;
+        const auto right = left + 1;
+        lock_heap_node(&mutex[left]);
+        auto child = left;
+        if (right < size) {
+            lock_heap_node(&mutex[right]);
+            if (path_weight(heap[right]) < path_weight(heap[left])) {
+                child = right;
             }
-            heap[index] = value;
-            mutex_unlock(&mutex[index]);
+            unlock_heap_node(&mutex[child == left ? right : left]);
         }
+        const double child_weight = path_weight(heap[child]);
+        if (weight <= child_weight) {
+            unlock_heap_node(&mutex[child]);
+            break;
+        }
+        heap[node] = heap[child];
+        if (node == 0) {
+            cutoff.store(child_weight, cuda::std::memory_order_relaxed);
+        }
+        unlock_heap_node(&mutex[node]);
+        node = child;
     }
+    heap[node] = value;
+    if (node == 0) {
+        cutoff.store(weight, cuda::std::memory_order_relaxed);
+    }
+    unlock_heap_node(&mutex[node]);
 }
-
-// Compare only the first 8 bytes (a double weight) for heap ordering and eviction.
-template<typename T, std::int64_t size>
-struct array_first_double_less {
-    __device__ double first_double(const std::array<T, size + sizeof(double) / sizeof(T)>& value) const {
-        double result;
-        for (std::int64_t i = 0; i < sizeof(double); ++i) {
-            reinterpret_cast<std::uint8_t*>(&result)[i] = reinterpret_cast<const std::uint8_t*>(&value[0])[i];
-        }
-        return result;
-    }
-
-    __device__ bool
-    operator()(const std::array<T, size + sizeof(double) / sizeof(T)>& lhs, const std::array<T, size + sizeof(double) / sizeof(T)>& rhs) const {
-        return first_double(lhs) < first_double(rhs);
-    }
-};
 
 // Extend the configuration subspace:
 // 1. Generate new configurations.
@@ -476,6 +396,7 @@ __device__ void find_relative_kernel(
     const std::array<std::uint8_t, n_qubytes>* exclude_configs, // exclude_size
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>* heap,
     int* mutex,
+    double* root_weight,
     std::int64_t heap_size
 ) {
     std::array<std::uint8_t, n_qubytes> current_configs = configs[batch_index];
@@ -511,8 +432,7 @@ __device__ void find_relative_kernel(
     std::int8_t sign = parity ? -1 : +1;
     double real = sign * (coef[term_index][0] * psi[batch_index][0] - coef[term_index][1] * psi[batch_index][1]);
     double imag = sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0]);
-    // Currently, the weight is calculated as the probability of the state, but it can be changed to other values in the future.
-    // TODO: I should choose a better way to calculate the weight for theoretical reasons.
+    // Rank individual Hamiltonian paths by their squared contribution.
     double weight = real * real + imag * imag;
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)> value;
     for (std::int64_t i = 0; i < sizeof(double) / sizeof(uint8_t); ++i) {
@@ -521,12 +441,7 @@ __device__ void find_relative_kernel(
     for (std::int64_t i = 0; i < n_qubytes; ++i) {
         value[i + sizeof(double) / sizeof(uint8_t)] = current_configs[i];
     }
-    add_into_heap<std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>, array_first_double_less<std::uint8_t, n_qubytes>>(
-        heap,
-        mutex,
-        heap_size,
-        value
-    );
+    add_into_heap(heap, mutex, root_weight, heap_size, value, weight);
 }
 
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
@@ -542,12 +457,16 @@ __global__ void find_relative_kernel_interface(
     const std::array<std::uint8_t, n_qubytes>* exclude_configs, // exclude_size
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>* heap,
     int* mutex,
+    double* root_weight,
     std::int64_t heap_size
 ) {
-    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (term_index < term_number && batch_index < batch_size) {
+    const std::int64_t term_index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (term_index >= term_number) {
+        return;
+    }
+    const auto batch_stride = static_cast<std::int64_t>(gridDim.y) * blockDim.y;
+    for (std::int64_t batch_index = static_cast<std::int64_t>(blockIdx.y) * blockDim.y + threadIdx.y;
+         batch_index < batch_size; batch_index += batch_stride) {
         find_relative_kernel<max_op_number, n_qubytes, particle_cut>(
             /*term_index=*/term_index,
             /*batch_index=*/batch_index,
@@ -562,12 +481,13 @@ __global__ void find_relative_kernel_interface(
             /*exclude_configs=*/exclude_configs,
             /*heap=*/heap,
             /*mutex=*/mutex,
+            /*root_weight=*/root_weight,
             /*heap_size=*/heap_size
         );
     }
 }
 
-template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
+template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut, bool return_pool = false>
 auto find_relative_interface(
     const torch::Tensor& configs,
     const torch::Tensor& psi,
@@ -585,9 +505,6 @@ auto find_relative_interface(
     at::cuda::CUDAGuard cuda_device_guard(device_id);
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -653,12 +570,9 @@ auto find_relative_interface(
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>* heap =
         reinterpret_cast<std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>*>(result_pool.data_ptr());
 
-    int* mutex;
-    AT_CUDA_CHECK(cudaMalloc(&mutex, sizeof(int) * count_selected));
-    AT_CUDA_CHECK(cudaMemset(mutex, 0, sizeof(int) * count_selected));
-    auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
-    auto num_blocks =
-        dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
+    auto mutex = torch::zeros({count_selected}, configs.options().dtype(torch::kInt32));
+    auto root_weight = torch::zeros({}, configs.options().dtype(torch::kFloat64));
+    const auto [num_blocks, threads_per_block] = term_batch_launch(term_number, batch_size, device_id);
     find_relative_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
@@ -670,11 +584,16 @@ auto find_relative_interface(
         /*psi=*/reinterpret_cast<const std::array<double, 2>*>(psi.data_ptr()),
         /*exclude_configs=*/reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
         /*heap=*/heap,
-        /*mutex=*/mutex,
+        /*mutex=*/mutex.data_ptr<int>(),
+        /*root_weight=*/root_weight.data_ptr<double>(),
         /*heap_size=*/count_selected
     );
-    AT_CUDA_CHECK(cudaStreamSynchronize(stream));
-    AT_CUDA_CHECK(cudaFree(mutex));
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Distributed selection needs the top individual paths (including repeated destinations).
+    if constexpr (return_pool) {
+        return result_pool;
+    }
 
     // Here, the bytes before sizeof(double) / sizeof(std::uint8_t) in result_pool are weights, and the bytes after are configs
     // We need to remove items with weight 0, then sort and deduplicate the configs
@@ -690,107 +609,10 @@ auto find_relative_interface(
     return unique_nonzero_result_config;
 }
 
-constexpr std::int64_t max_uint8_t = 256;
-using largest_atomic_int = unsigned int; // The largest int type that can be atomicAdd/atomicSub
-using smallest_atomic_int = unsigned short int; // The smallest int type that can be atomicCAS
-
-// A 256-way trie supports parallel configuration deduplication and amplitude accumulation on the GPU.
-// Each level corresponds to one configuration byte (uint8); leaves store complex amplitudes.
-template<std::int64_t n_qubytes>
-struct dictionary_tree {
-    using child_t = dictionary_tree<n_qubytes - 1>;
-    child_t* children[max_uint8_t];
-    smallest_atomic_int exist[max_uint8_t];
-    largest_atomic_int nonzero_count;
-
-    __device__ bool add(std::uint8_t* begin, double real, double imag) {
-        std::uint8_t index = *begin;
-        if (children[index] == nullptr) {
-            if (atomicCAS(&exist[index], smallest_atomic_int(0), smallest_atomic_int(1))) {
-                while (atomicCAS((largest_atomic_int*)&children[index], largest_atomic_int(0), largest_atomic_int(0)) == 0) {
-                }
-            } else {
-                auto new_child = (child_t*)malloc(sizeof(child_t));
-                assert(new_child != nullptr);
-                memset(new_child, 0, sizeof(child_t));
-                children[index] = new_child;
-                __threadfence();
-            }
-        }
-        if (children[index]->add(begin + 1, real, imag)) {
-            atomicAdd(&nonzero_count, 1);
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    template<std::int64_t n_total_qubytes>
-    __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
-        std::uint64_t size_counter = 0;
-        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
-            if (exist[i]) {
-                std::uint64_t new_size_counter = size_counter + children[i]->nonzero_count;
-                if (new_size_counter > index) {
-                    std::uint64_t new_index = index - size_counter;
-                    configs[index][n_total_qubytes - n_qubytes] = i;
-                    children[i]->collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
-                    if (atomicSub(&children[i]->nonzero_count, 1) == 1) {
-                        free(children[i]);
-                    };
-                    return;
-                }
-                size_counter = new_size_counter;
-            }
-        }
-    }
-};
-
-// Trie recursion base case: leaf nodes store the wavefunction amplitude.
-template<>
-struct dictionary_tree<1> {
-    double values[max_uint8_t][2];
-    smallest_atomic_int exist[max_uint8_t];
-    largest_atomic_int nonzero_count;
-
-    __device__ bool add(std::uint8_t* begin, double real, double imag) {
-        std::uint8_t index = *begin;
-        atomicAdd(&values[index][0], real);
-        atomicAdd(&values[index][1], imag);
-        if (atomicCAS(&exist[index], smallest_atomic_int(0), smallest_atomic_int(1))) {
-            return false;
-        } else {
-            atomicAdd(&nonzero_count, 1);
-            return true;
-        }
-    }
-
-    template<std::int64_t n_total_qubytes>
-    __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
-        std::uint64_t size_counter = 0;
-        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
-            if (exist[i]) {
-                if (size_counter == index) {
-                    configs[index][n_total_qubytes - 1] = i;
-                    psi[index][0] = values[i][0];
-                    psi[index][1] = values[i][1];
-                    return;
-                }
-                ++size_counter;
-            }
-        }
-    }
-};
-
-// Enumerate the configuration subspace:
-// 1. Generate new configurations.
-// 2. Exclude existing configurations using binary search.
-// 3. Insert new configurations and amplitudes into the trie.
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
-__device__ void list_relative_kernel(
-    std::int64_t term_index,
-    std::int64_t batch_index,
-    std::int64_t term_number,
+__global__ void enumerate_relative_tile(
+    std::int64_t first_pair,
+    std::int64_t count,
     std::int64_t batch_size,
     std::int64_t exclude_size,
     const std::array<std::int16_t, max_op_number>* site,
@@ -799,103 +621,53 @@ __device__ void list_relative_kernel(
     const std::array<std::uint8_t, n_qubytes>* configs,
     const std::array<double, 2>* psi,
     const std::array<std::uint8_t, n_qubytes>* exclude_configs,
-    dictionary_tree<n_qubytes>* result_tree
+    std::array<std::uint8_t, n_qubytes>* out_configs,
+    std::array<double, 2>* out_psi,
+    bool* valid
 ) {
-    std::array<std::uint8_t, n_qubytes> current_configs = configs[batch_index];
-    auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(
-        /*current_configs=*/current_configs,
-        /*term_index=*/term_index,
-        /*site=*/site,
-        /*kind=*/kind
-    );
-
+    const std::int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= count) {
+        return;
+    }
+    const auto term = (first_pair + row) / batch_size;
+    const auto source = (first_pair + row) % batch_size;
+    auto config = configs[source];
+    auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(config, term, site, kind);
     if (!success) {
         return;
     }
 
-    // Use binary search to exclude basis states already in exclude_configs.
     std::int64_t low = 0, high = exclude_size - 1;
-    auto compare = array_less<std::uint8_t, n_qubytes>();
+    auto less = array_less<std::uint8_t, n_qubytes>();
     while (low <= high) {
-        std::int64_t mid = (low + high) / 2;
-        if (compare(current_configs, exclude_configs[mid])) {
+        auto mid = low + (high - low) / 2;
+        if (less(config, exclude_configs[mid])) {
             high = mid - 1;
-        } else if (compare(exclude_configs[mid], current_configs)) {
+        } else if (less(exclude_configs[mid], config)) {
             low = mid + 1;
         } else {
-            return; // The configuration already exists.
+            return;
         }
     }
 
-    std::int8_t sign = parity ? -1 : +1;
-    result_tree->add(
-        current_configs.data(),
-        sign * (coef[term_index][0] * psi[batch_index][0] - coef[term_index][1] * psi[batch_index][1]),
-        sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0])
-    );
+    const double sign = parity ? -1 : 1;
+    out_configs[row] = config;
+    out_psi[row][0] = sign * (coef[term][0] * psi[source][0] - coef[term][1] * psi[source][1]);
+    out_psi[row][1] = sign * (coef[term][0] * psi[source][1] + coef[term][1] * psi[source][0]);
+    valid[row] = true;
 }
 
-template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
-__global__ void list_relative_kernel_interface(
-    std::int64_t term_number,
-    std::int64_t batch_size,
-    std::int64_t exclude_size,
-    const std::array<std::int16_t, max_op_number>* site,
-    const std::array<std::uint8_t, max_op_number>* kind,
-    const std::array<double, 2>* coef,
-    const std::array<std::uint8_t, n_qubytes>* configs,
-    const std::array<double, 2>* psi,
-    const std::array<std::uint8_t, n_qubytes>* exclude_configs,
-    dictionary_tree<n_qubytes>* result_tree
-) {
-    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
-    if (term_index < term_number && batch_index < batch_size) {
-        list_relative_kernel<max_op_number, n_qubytes, particle_cut>(
-            term_index,
-            batch_index,
-            term_number,
-            batch_size,
-            exclude_size,
-            site,
-            kind,
-            coef,
-            configs,
-            psi,
-            exclude_configs,
-            result_tree
-        );
-    }
+using WeightedConfigs = std::pair<torch::Tensor, torch::Tensor>;
+
+WeightedConfigs sum_equal_configs(const torch::Tensor& keys, const torch::Tensor& values) {
+    auto [unique, inverse, counts] = torch::unique_dim(keys, 0, true, true, false);
+    auto sums = torch::zeros({unique.size(0), 2}, values.options());
+    sums.index_add_(0, inverse, values);
+    return {unique, sums};
 }
 
-template<std::int64_t n_qubytes>
-__global__ void collect_tree_kernel(
-    std::uint64_t result_size,
-    dictionary_tree<n_qubytes>* result_tree,
-    std::array<std::uint8_t, n_qubytes>* configs,
-    std::array<double, 2>* psi
-) {
-    std::int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < result_size) {
-        result_tree->template collect<n_qubytes>(index, configs, psi);
-    }
-}
-
-bool first_call_to_set_heap_limit = true;
-
-void _set_heap_limit() {
-    // Increase the CUDA dynamic allocation limit to accommodate trie nodes.
-    if (first_call_to_set_heap_limit) {
-        size_t expect = 1 << 60;
-        size_t actual = 0;
-        do {
-            cudaDeviceSetLimit(cudaLimitMallocHeapSize, expect);
-            cudaDeviceGetLimit(&actual, cudaLimitMallocHeapSize);
-            expect >>= 1;
-        } while (actual != expect);
-
-        first_call_to_set_heap_limit = false;
-    }
+WeightedConfigs merge_weighted_configs(const WeightedConfigs& a, const WeightedConfigs& b) {
+    return sum_equal_configs(torch::cat({a.first, b.first}), torch::cat({a.second, b.second}));
 }
 
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
@@ -915,10 +687,6 @@ auto list_relative_interface(
     at::cuda::CUDAGuard cuda_device_guard(device_id);
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
-    _set_heap_limit();
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -968,57 +736,69 @@ auto list_relative_interface(
     TORCH_CHECK(exclude_configs.size(0) == exclude_size, "configs batch size must match the provided exclude_size.");
     TORCH_CHECK(exclude_configs.size(1) == n_qubytes, "configs must have the same number of qubits as the provided n_qubytes.");
 
+    if (!batch_size || !term_number) {
+        return {torch::empty({0, n_qubytes}, configs.options()), torch::empty({0, 2}, psi.options())};
+    }
+    TORCH_CHECK(term_number <= std::numeric_limits<std::int64_t>::max() / batch_size, "Too many term/configuration pairs.");
     auto sorted_exclude_configs = exclude_configs.clone(torch::MemoryFormat::Contiguous);
-    thrust::sort(
-        policy,
-        reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
-        reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()) + exclude_size,
-        array_less<std::uint8_t, n_qubytes>()
-    );
-
-    dictionary_tree<n_qubytes>* result_tree;
-    AT_CUDA_CHECK(cudaMalloc(&result_tree, sizeof(dictionary_tree<n_qubytes>)));
-    AT_CUDA_CHECK(cudaMemset(result_tree, 0, sizeof(dictionary_tree<n_qubytes>)));
-
-    auto threads_per_block = dim3{1, max_threads_per_block >> 1};
-    auto num_blocks = dim3{
-        (unsigned int)(term_number + threads_per_block.x - 1) / threads_per_block.x,
-        (unsigned int)(batch_size + threads_per_block.y - 1) / threads_per_block.y
-    };
-    list_relative_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
-        term_number,
-        batch_size,
-        exclude_size,
-        reinterpret_cast<const std::array<std::int16_t, max_op_number>*>(site.data_ptr()),
-        reinterpret_cast<const std::array<std::uint8_t, max_op_number>*>(kind.data_ptr()),
-        reinterpret_cast<const std::array<double, 2>*>(coef.data_ptr()),
-        reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(configs.data_ptr()),
-        reinterpret_cast<const std::array<double, 2>*>(psi.data_ptr()),
-        reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
-        result_tree
-    );
-
-    long long result_size;
-    AT_CUDA_CHECK(cudaMemcpyAsync(&result_size, &result_tree->nonzero_count, sizeof(long long), cudaMemcpyDeviceToHost, stream));
-    AT_CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    auto result_configs = torch::zeros({result_size, n_qubytes}, torch::TensorOptions().dtype(torch::kUInt8).device(device, device_id));
-    auto result_psi = torch::zeros({result_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
-
-    if (result_size > 0) {
-        int threads_collect = prop.maxThreadsPerBlock >> 1;
-        int blocks_collect = (result_size + threads_collect - 1) / threads_collect;
-        collect_tree_kernel<n_qubytes><<<blocks_collect, threads_collect, 0, stream>>>(
-            result_size,
-            result_tree,
-            reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(result_configs.data_ptr()),
-            reinterpret_cast<std::array<double, 2>*>(result_psi.data_ptr())
-        );
-        AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (exclude_size > 1) {
+        auto begin = reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr());
+        thrust::sort(policy, begin, begin + exclude_size, array_less<std::uint8_t, n_qubytes>());
     }
 
-    AT_CUDA_CHECK(cudaFree(result_tree));
-    return std::make_tuple(result_configs, result_psi);
+    // Bound temporary candidate storage independently of the size of the Cartesian product.
+    constexpr std::int64_t tile_size = 1 << 18;
+    constexpr unsigned int threads = 256;
+    const std::int64_t pairs = batch_size * term_number;
+    std::vector<WeightedConfigs> levels;
+    for (std::int64_t first = 0; first < pairs;) {
+        const auto count = std::min(tile_size, pairs - first);
+        auto keys = torch::empty({count, n_qubytes}, configs.options());
+        auto values = torch::empty({count, 2}, psi.options());
+        auto valid = torch::zeros({count}, configs.options().dtype(torch::kBool));
+        const auto blocks = static_cast<unsigned int>((count + threads - 1) / threads);
+        enumerate_relative_tile<max_op_number, n_qubytes, particle_cut><<<blocks, threads, 0, stream>>>(
+            first, count, batch_size, exclude_size,
+            reinterpret_cast<const std::array<std::int16_t, max_op_number>*>(site.data_ptr()),
+            reinterpret_cast<const std::array<std::uint8_t, max_op_number>*>(kind.data_ptr()),
+            reinterpret_cast<const std::array<double, 2>*>(coef.data_ptr()),
+            reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(configs.data_ptr()),
+            reinterpret_cast<const std::array<double, 2>*>(psi.data_ptr()),
+            reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
+            reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(keys.data_ptr()),
+            reinterpret_cast<std::array<double, 2>*>(values.data_ptr()),
+            valid.data_ptr<bool>()
+        );
+        C10_CUDA_CHECK(cudaGetLastError());
+        first += count;
+        auto indices = torch::nonzero(valid).reshape({-1});
+        if (indices.numel() == 0) {
+            continue;
+        }
+        auto current = sum_equal_configs(keys.index_select(0, indices), values.index_select(0, indices));
+        // Binary merging avoids re-sorting all previous tiles on every iteration.
+        std::size_t level = 0;
+        while (level < levels.size() && levels[level].first.defined()) {
+            current = merge_weighted_configs(levels[level], current);
+            levels[level] = {};
+            ++level;
+        }
+        if (level == levels.size()) {
+            levels.emplace_back();
+        }
+        levels[level] = std::move(current);
+    }
+
+    WeightedConfigs result;
+    for (const auto& partial : levels) {
+        if (partial.first.defined()) {
+            result = result.first.defined() ? merge_weighted_configs(partial, result) : partial;
+        }
+    }
+    if (!result.first.defined()) {
+        return {torch::empty({0, n_qubytes}, configs.options()), torch::empty({0, 2}, psi.options())};
+    }
+    return {result.first, result.second};
 }
 
 // Compute the diagonal contribution of the Hamiltonian.
@@ -1065,10 +845,13 @@ __global__ void diagonal_term_kernel_interface(
     const std::array<std::uint8_t, n_qubytes>* configs, // batch_size
     std::array<double, 2>* result_psi
 ) {
-    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (term_index < term_number && batch_index < batch_size) {
+    const std::int64_t term_index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (term_index >= term_number) {
+        return;
+    }
+    const auto batch_stride = static_cast<std::int64_t>(gridDim.y) * blockDim.y;
+    for (std::int64_t batch_index = static_cast<std::int64_t>(blockIdx.y) * blockDim.y + threadIdx.y;
+         batch_index < batch_size; batch_index += batch_stride) {
         diagonal_term_kernel<max_op_number, n_qubytes, particle_cut>(
             /*term_index=*/term_index,
             /*batch_index=*/batch_index,
@@ -1093,9 +876,6 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
     at::cuda::CUDAGuard cuda_device_guard(device_id);
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -1131,9 +911,7 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
 
     auto result_psi = torch::zeros({batch_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
 
-    auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
-    auto num_blocks =
-        dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
+    const auto [num_blocks, threads_per_block] = term_batch_launch(term_number, batch_size, device_id);
     diagonal_term_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
@@ -1143,7 +921,7 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
         /*configs=*/reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(configs.data_ptr()),
         /*result_psi=*/reinterpret_cast<std::array<double, 2>*>(result_psi.data_ptr())
     );
-    AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     return result_psi;
 }
@@ -1161,6 +939,7 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
 TORCH_LIBRARY_IMPL(HAAR_Q_LIBRARY(N_QUBYTES, PARTICLE_CUT), CUDA, m) {
     m.impl("apply_within", apply_within_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("find_relative", find_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
+    m.impl("relative_candidate_pool", find_relative_interface<4, N_QUBYTES, PARTICLE_CUT, true>);
     m.impl("list_relative", list_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("diagonal_term", diagonal_term_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
 }

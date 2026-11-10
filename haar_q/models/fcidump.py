@@ -8,9 +8,12 @@ import re
 import gzip
 import pathlib
 import hashlib
+import tempfile
+from collections.abc import Iterator
+import numpy as np
 import torch
 import yaml  # type: ignore[import-untyped]
-import openfermion
+from openfermion.config import EQ_TOLERANCE  # type: ignore[import-untyped]
 import platformdirs
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
 from ..networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
@@ -32,81 +35,134 @@ class ModelConfig:
     ref_energy: float | None = None
 
 
+def _load_integrals(
+    file_name: pathlib.Path, *, headonly: bool = False
+) -> tuple[tuple[int, int, int], tuple[float, np.ndarray, np.ndarray] | None]:
+    """Read restricted spatial integrals in eightfold-packed chemists' notation."""
+    with (
+        gzip.open(file_name, "rt", encoding="utf-8") if file_name.suffix == ".gz" else file_name.open(encoding="utf-8")
+    ) as stream:
+        header = []
+        for line in stream:
+            header.append(line)
+            if re.search(r"&end\b|/", line, flags=re.I):
+                break
+        else:
+            raise ValueError("Missing FCIDUMP header terminator (&END or /).")
+        fields = dict(re.findall(r"\b(NORB|NELEC|MS2)\s*=\s*([+-]?\d+)", " ".join(header).upper()))
+        if fields.keys() != {"NORB", "NELEC", "MS2"}:
+            raise ValueError("FCIDUMP must specify NORB, NELEC and MS2.")
+        if re.search(r"\b(?:I?UHF)\s*=\s*(?:1\b|\.?T)", " ".join(header), flags=re.I):
+            raise ValueError("The FCIDUMP model requires restricted spatial integrals.")
+        n, nel, spin = (int(fields[key]) for key in ("NORB", "NELEC", "MS2"))
+        if not 0 < n <= 16384 or (nel - spin) % 2 or not abs(spin) <= nel <= 2 * n - abs(spin):
+            raise ValueError("Invalid FCIDUMP orbital count, electron count or spin projection.")
+        if headonly:
+            return (n, nel, spin), None
+        pairs = n * (n + 1) // 2
+        eri = np.zeros(pairs * (pairs + 1) // 2, dtype=np.float64)
+        h1 = np.zeros((n, n), dtype=np.float64)
+        core = 0.0
+        for line in stream:
+            parts = line.split()
+            if not parts:
+                continue
+            coeff, *indices = parts
+            v = float(coeff.replace("D", "E").replace("d", "e"))
+            i, j, k, ell = map(int, indices)
+            if not all(0 <= index <= n for index in (i, j, k, ell)):
+                raise ValueError(f"Orbital index outside 0..{n}: {indices}")
+            if i == j == k == ell == 0:
+                core = v
+            elif j == k == ell == 0:
+                continue  # Orbital energies in the Psi4 extension.
+            elif i and j and k == ell == 0:
+                h1[i - 1, j - 1] = h1[j - 1, i - 1] = v
+            elif i and j and k and ell:
+                p = max(i, j) * (max(i, j) - 1) // 2 + min(i, j) - 1
+                q = max(k, ell) * (max(k, ell) - 1) // 2 + min(k, ell) - 1
+                hi, lo = max(p, q), min(p, q)
+                eri[hi * (hi + 1) // 2 + lo] = v
+            else:
+                raise ValueError(f"Invalid FCIDUMP integral indices: {indices}")
+    return (n, nel, spin), (core, h1, eri)
+
+
+def _term_blocks(core: float, h1: np.ndarray, eri: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield columns of normal-ordered sites and their real coefficients in bounded blocks."""
+    tol = EQ_TOLERANCE
+    if abs(core) >= tol:
+        yield np.empty((1, 0), np.int16), np.array([core])
+    n = len(h1)
+    rows, cols = np.nonzero(np.abs(h1) >= tol)
+    for spin in (0, 1):
+        yield np.column_stack((2 * rows + spin, 2 * cols + spin)), h1[rows, cols]
+    # Index each spin orbital pair (p>q). Only annihilator pairs with the same spin counts contribute.
+    s, r = np.triu_indices(2 * n, k=1)
+    pair_spin = (s % 2) + (r % 2)
+    groups = [(r[pair_spin == group], s[pair_spin == group]) for group in (0, 1, 2)]
+    a = np.arange(n)
+    hi = np.maximum.outer(a, a)
+    pair = hi * (hi + 1) // 2 + np.minimum.outer(a, a)
+
+    def half_integral(p: np.integer, s: np.ndarray, q: np.integer, r: np.ndarray) -> np.ndarray:
+        ps, qr = pair[p // 2, s // 2], pair[q // 2, r // 2]
+        major = np.maximum(ps, qr)
+        half = 0.5 * eri[major * (major + 1) // 2 + np.minimum(ps, qr)]
+        return np.where(((p % 2) == (s % 2)) & (np.abs(half) >= tol), half, 0.0)
+
+    for p, q in zip(r, s):
+        ra, sa = groups[(p % 2) + (q % 2)]
+        direct = half_integral(p, sa, q, ra)
+        exchange = half_integral(p, ra, q, sa)
+        # OpenFermion discards small terms after each normal-order addition.
+        # Lexicographic raw spin indices add D, -X, -X, D (half integrals).
+        value = direct - exchange
+        value[np.abs(value) < tol] = 0
+        value -= exchange
+        value[np.abs(value) < tol] = 0
+        value += direct
+        active = np.abs(value) >= tol
+        if active.any():
+            sites = np.empty((np.count_nonzero(active), 4), np.int16)
+            sites[:, 0], sites[:, 1] = p, q
+            sites[:, 2], sites[:, 3] = ra[active], sa[active]
+            yield sites, value[active]
+
+
+def _packed_terms(integrals: tuple[float, np.ndarray, np.ndarray]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Count first so output allocation is exact, even for a nearly dense active space.
+    count = sum(len(values) for _, values in _term_blocks(*integrals))
+    logging.info(
+        "Preparing %d normal-ordered FCIDUMP terms (%.2f GiB of packed operator data)", count, count * 28 / 2**30
+    )
+    sites = np.zeros((count, 4), dtype=np.int16)
+    kinds = np.full((count, 4), 2, dtype=np.uint8)
+    coefficients = np.zeros((count, 2), dtype=np.float64)
+    start = 0
+    for block, values in _term_blocks(*integrals):
+        end = start + len(values)
+        width = block.shape[1]
+        sites[start:end, :width] = block
+        kinds[start:end, : width // 2] = 1
+        kinds[start:end, width // 2 : width] = 0
+        coefficients[start:end, 0] = values
+        start = end
+    return torch.from_numpy(sites), torch.from_numpy(kinds), torch.from_numpy(coefficients)
+
+
 def read_fcidump(
     file_name: pathlib.Path, *, headonly: bool = False
 ) -> tuple[tuple[int, int, int], dict[tuple[tuple[int, int], ...], complex]]:
-    with (
-        gzip.open(file_name, "rt", encoding="utf-8")
-        if file_name.name.endswith(".gz")
-        else open(file_name, "rt", encoding="utf-8") as file
-    ):
-        n_orbit: int | None = None
-        n_electron: int | None = None
-        n_spin: int | None = None
-        for line in file:
-            data: str = line.lower()
-            if (match := re.search(r"norb\s*=\s*(\d+)", data)) is not None:
-                n_orbit = int(match.group(1))
-            if (match := re.search(r"nelec\s*=\s*(\d+)", data)) is not None:
-                n_electron = int(match.group(1))
-            if (match := re.search(r"ms2\s*=\s*(\d+)", data)) is not None:
-                n_spin = int(match.group(1))
-            if "&end" in data:
-                break
-        assert n_orbit is not None
-        assert n_electron is not None
-        assert n_spin is not None
-        if headonly:
-            return (n_orbit, n_electron, n_spin), {}
-        energy_0: float = 0.0
-        energy_1: torch.Tensor = torch.zeros([n_orbit, n_orbit], dtype=torch.float64)
-        energy_2: torch.Tensor = torch.zeros([n_orbit, n_orbit, n_orbit, n_orbit], dtype=torch.float64)
-        for line in file:
-            pieces: list[str] = line.split()
-            coefficient: float = float(pieces[0])
-            sites: tuple[int, ...] = tuple(int(i) - 1 for i in pieces[1:])
-            match sites:
-                case (-1, -1, -1, -1):
-                    energy_0 = coefficient
-                case (_, -1, -1, -1):
-                    # Psi4 writes additional non-standard one-electron integrals in this format, which we omit.
-                    pass
-                case (i, j, -1, -1):
-                    energy_1[i, j] = coefficient
-                    energy_1[j, i] = coefficient
-                case (_, _, _, -1):
-                    # In the standard FCIDUMP format, there is no such term.
-                    raise ValueError(f"Invalid FCIDUMP format: {sites}")
-                case (i, j, k, l):
-                    energy_2[i, j, k, l] = coefficient
-                    energy_2[i, j, l, k] = coefficient
-                    energy_2[j, i, k, l] = coefficient
-                    energy_2[j, i, l, k] = coefficient
-                    energy_2[l, k, j, i] = coefficient
-                    energy_2[k, l, j, i] = coefficient
-                    energy_2[l, k, i, j] = coefficient
-                    energy_2[k, l, i, j] = coefficient
-                case _:
-                    raise ValueError(f"Invalid FCIDUMP format: {sites}")
-
-    energy_2 = energy_2.permute(0, 2, 3, 1).contiguous() / 2
-    energy_1_b: torch.Tensor = torch.zeros([n_orbit * 2, n_orbit * 2], dtype=torch.float64)
-    energy_2_b: torch.Tensor = torch.zeros([n_orbit * 2, n_orbit * 2, n_orbit * 2, n_orbit * 2], dtype=torch.float64)
-    energy_1_b[0::2, 0::2] = energy_1
-    energy_1_b[1::2, 1::2] = energy_1
-    energy_2_b[0::2, 0::2, 0::2, 0::2] = energy_2
-    energy_2_b[0::2, 1::2, 1::2, 0::2] = energy_2
-    energy_2_b[1::2, 0::2, 0::2, 1::2] = energy_2
-    energy_2_b[1::2, 1::2, 1::2, 1::2] = energy_2
-
-    interaction_operator: openfermion.InteractionOperator = openfermion.InteractionOperator(
-        energy_0, energy_1_b.numpy(), energy_2_b.numpy()
-    )  # type: ignore[no-untyped-call]
-    fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(interaction_operator)  # type: ignore[no-untyped-call]
-    return (n_orbit, n_electron, n_spin), {
-        k: complex(v)
-        for k, v in openfermion.normal_ordered(fermion_operator).terms.items()  # type: ignore[no-untyped-call]
-    }
+    """Read metadata and optionally return the historical dictionary representation."""
+    header, integrals = _load_integrals(file_name, headonly=headonly)
+    terms = {}
+    if integrals is not None:
+        for sites, values in _term_blocks(*integrals):
+            for row, value in zip(sites, values):
+                key = tuple((int(site), int(k < len(row) // 2)) for k, site in enumerate(row))
+                terms[key] = complex(value)
+    return header, terms
 
 
 class Model(ModelProto[ModelConfig]):
@@ -123,7 +179,8 @@ class Model(ModelProto[ModelConfig]):
         model_name = model_path.name
         ref_energy = args.ref_energy
 
-        checksum = hashlib.sha256(model_path.read_bytes()).hexdigest() + "v5"
+        with model_path.open("rb") as raw:
+            checksum = hashlib.file_digest(raw, "sha256").hexdigest() + "v6"
         cache_file = platformdirs.user_cache_path("haar-q", "HAAR-Q") / checksum
         if cache_file.exists():
             logging.info("Loading FCIDUMP metadata from file: %s", model_path)
@@ -131,25 +188,28 @@ class Model(ModelProto[ModelConfig]):
             logging.info("FCIDUMP metadata successfully loaded")
 
             logging.info("Loading FCIDUMP Hamiltonian from cache")
-            openfermion_hamiltonian_data = torch.load(cache_file, map_location="cpu", weights_only=True)
+            packed_hamiltonian = torch.load(cache_file, map_location="cpu", weights_only=True)
             logging.info("FCIDUMP Hamiltonian successfully loaded")
 
-            logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
-            self.hamiltonian = Hamiltonian(openfermion_hamiltonian_data, kind="fermi")
-            logging.info("Internal Hamiltonian representation has been successfully created")
+            self.hamiltonian = Hamiltonian(packed_hamiltonian, kind="fermi")
         else:
             logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_path)
-            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_path)
+            (n_orbit, n_electron, n_spin), integrals = _load_integrals(model_path)
+            assert integrals is not None
             logging.info("FCIDUMP Hamiltonian successfully loaded")
 
-            logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
-            self.hamiltonian = Hamiltonian(openfermion_hamiltonian_dict, kind="fermi")
+            logging.info("Packing restricted spatial integrals into normal-ordered Hamiltonian terms")
+            self.hamiltonian = Hamiltonian(_packed_terms(integrals), kind="fermi")
+            self.hamiltonian._sort_site_kind_coef()
             logging.info("Internal Hamiltonian representation has been successfully created")
 
-            logging.info("Caching OpenFermion Hamiltonian")
+            logging.info("Caching packed FCIDUMP Hamiltonian")
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            torch.save((self.hamiltonian.site, self.hamiltonian.kind, self.hamiltonian.coef), cache_file)
-            logging.info("OpenFermion Hamiltonian successfully cached")
+            with tempfile.TemporaryDirectory(dir=cache_file.parent) as tmp:
+                staging = pathlib.Path(tmp) / "terms"
+                torch.save((self.hamiltonian.site, self.hamiltonian.kind, self.hamiltonian.coef), staging)
+                staging.replace(cache_file)
+            logging.info("FCIDUMP Hamiltonian successfully cached")
 
         self.n_qubits: int = n_orbit * 2
         self.n_electrons: int = n_electron

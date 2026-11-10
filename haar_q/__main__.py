@@ -3,6 +3,7 @@
 import argparse
 import copy
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -74,6 +75,11 @@ def _run(runtime_config: DictConfig) -> None:
 
 def main(runtime_config: DictConfig | None = None) -> None:
     """Select the primary input file and let Hydra compose and launch the job."""
+    if "LOCAL_RANK" in os.environ and int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        raise RuntimeError(
+            "HAAR-Q manages all GPUs in one process. Launch python -m haar_q -i input.yaml "
+            "and select your GPUs with common.gpu_devices."
+        )
     if runtime_config is not None:
         _run(_prepare_input(runtime_config, None, check=True))
         return

@@ -166,6 +166,7 @@ class HaarWithOrbitConfig:
         logging.info("Saved optimized basis to %s", optimized_path)
 
         new_model = OptimizedModel(OptimizedModelConfig(model_path=optimized_path))
+        context.configure_model_devices(new_model)
 
         return new_model, optimized_path
 

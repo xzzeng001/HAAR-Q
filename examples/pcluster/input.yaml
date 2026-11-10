@@ -1,0 +1,48 @@
+# One-cycle HAAR-SCI smoke calculation for the nitrogenase P-cluster active space.
+# Place this input beside models/FCIDUMP or override files.fcidump with an absolute path.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: transformers
+  - optim: adam
+  - _self_
+
+common:
+  device: cuda
+  gpu_devices: [0, 1]      # Ordinals visible inside one node allocation. The first is primary.
+  dtype: float64
+  max_relative_step: 1
+  random_seed: 2333
+  checkpoint_interval: 5
+  parent_path: null
+
+files:
+  fcidump: models/FCIDUMP
+  ref_energy: null         # The FCIDUMP constant is part of H, not a benchmark energy.
+symmetry: u1u1             # The target file has 57 alpha and 57 beta electrons.
+sampling_control:
+  seed_count: 4
+  target_basis_size: 8     # Used by method=vmc.
+  unique_seeds: true
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+states:
+  roots: 2                 # Used by method=excited, including the ground state.
+  residual_tolerance: 1.0e-8
+options:
+  method:
+    haar:
+      krylov_extend_count: 4
+      krylov_extend_first: true
+      krylov_iteration: 2
+  ansatz:
+    transformers:
+      embedding_dim: 32
+      heads_num: 4
+      feed_forward_dim: 64
+      depth: 2
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/pcluster/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

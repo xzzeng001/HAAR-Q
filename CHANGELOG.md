@@ -1,5 +1,28 @@
 # HAAR-Q changelog
 
+## 0.6.0
+
+0.5.0 → 0.6.0 (MINOR). HAAR-Q gains a single-process, single-node multi-GPU
+backend for selected-space Hamiltonian products and neural wavefunction fitting.
+
+- Set `common.device: cuda` and `common.gpu_devices: [0, 1]` to share work
+  across the two visible GPUs. The first GPU owns sampling and optimizer state.
+- On CUDA, multi-root SCI uses device-resident block iteration above 128
+  determinants. The projected residual and orthogonality checks also apply here.
+- Hamiltonian-guided expansion now ranks candidates from all participating
+  GPUs before deduplication. Native CUDA kernels tile large term lists.
+- Fixed incorrect connected-determinant enumeration for multi-byte
+  configurations on CPU and replaced unsafe CUDA trie traversal with tiled
+  reduction. Perturbative corrections computed with affected versions can
+  change when external determinants or their accumulated amplitudes differ.
+- On supported closed-shell geometries, the two-electron density transformation
+  and analytical force contractions can use all selected GPUs.
+- The FCIDUMP model packs restricted spatial integrals directly into native
+  normal-ordered terms, reducing host memory during preparation. Imported
+  integrals use the existing OpenFermion coefficient tolerance.
+- Added a [nitrogenase P-cluster example](examples/pcluster/input.yaml) for a
+  73-orbital, 114-electron FCIDUMP and single-/two-GPU numerical checks.
+
 ## 0.5.0
 
 0.4.0 → 0.5.0 (MINOR). The input gains a multi-state SCI workflow and

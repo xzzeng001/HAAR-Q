@@ -171,6 +171,81 @@ directory, for example with `python -m haar_q -i examples/h2/input.yaml`.
 Existing jobs using a working-directory `config.yaml` or Hydra's
 `--config-name` option still work.
 
+#### Single-node CUDA and the nitrogenase P-cluster
+
+Use one HAAR-Q process per job. The ordinals in `common.gpu_devices` are relative to the
+devices visible to that process. The first GPU owns the network parameters, optimizer,
+selected basis and checkpoints. An empty list uses `common.device`. For example, from
+an environment with a CUDA build of PyTorch, a matching CUDA toolkit (`nvcc`) and a C++20 compiler:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.device_count())"
+nvcc --version
+python -m haar_q -i input.yaml common.device=cuda:0
+python -m haar_q -i input.yaml common.device=cuda 'common.gpu_devices=[0,1]'
+```
+
+| Stage | Where it runs |
+| --- | --- |
+| Autoregressive generation and unique sampling | Primary GPU, preserving one sampling distribution and one RNG stream for generation |
+| Hamiltonian-guided expansion | GPUs search disjoint source determinants. The primary ranks candidate paths globally and deduplicates the selected determinants |
+| Projected Hamiltonian products | GPUs process disjoint source determinants and sum their contributions to each target on the primary |
+| Network amplitudes and fitting | MLP, Transformer and MPS split determinant batches across GPUs. The primary combines gradients before one optimizer update |
+| Excited-state SCI | Small selected spaces use dense diagonalization on the primary. Above 128 determinants the CUDA solver keeps its block Krylov vectors on the primary and distributes its Hamiltonian products |
+| Analytical forces on supported geometry inputs | GPUs transform two-body density slabs and contract two-electron integral derivatives. PySCF constructs the RDM, derivative integrals and orbital response on the CPU |
+| Molecular preparation and ground-state Lanczos | FCIDUMP parsing and PySCF SCF/integrals use the CPU. Ground-state HAAR also uses it for older Lanczos vectors and its small tridiagonal solve |
+
+Each participating GPU must hold the Hamiltonian terms and full target determinant list.
+Network replicas, temporary tensors and the primary solver workspace need additional memory.
+The matvec cost still grows with the product of the term count and the selected source count.
+Adding cards distributes work within one node. Multi-node MPI/DDP launches are unsupported.
+
+The [P-cluster input](examples/pcluster/input.yaml) is a one-cycle Transformer HAAR-SCI
+smoke calculation. For the supplied nitrogenase [8Fe–7S] integral file, `NORB=73`,
+`NELEC=114` and `MS2=0` select 57 alpha and 57 beta electrons. The determinant
+uses 19 packed bytes. Packed Hamiltonian terms alone occupy about 1.08 GiB per GPU.
+The value of `MS2` fixes a spin projection. Assigning a total spin or identifying an
+oxidation state requires additional information. The FCIDUMP supplies energies and
+electronic integrals. Analytical nuclear forces require integral derivatives and
+the supported closed-shell geometry workflow, which has a 32-spatial-orbital limit.
+
+For this file, a CPU one-cycle HAAR-SCI run expanded four network seeds to
+12 determinants, and an expanded-space VMC run used eight determinants.
+A standalone CUDA 12.6 kernel check streamed all 41,528,584 operator terms
+through a GTX 1650 for a two-determinant projected matrix and its diagonal.
+The maximum difference against the native CPU result was below
+1.5e-11 hartree. Full two-GPU Python runs and P-cluster scaling have yet to
+be measured on a multi-GPU node.
+
+From the checkout on a Slurm cluster, set the path to the copy visible on the node:
+
+```bash
+srun --nodes=1 --ntasks=1 --gpus-per-node=2 python -m haar_q -i examples/pcluster/input.yaml files.fcidump=/path/to/models/FCIDUMP
+```
+
+In PowerShell with the WSL Python function below, use the WSL path to the file:
+
+```powershell
+$fcidump = '/mnt/j/paper/HAAR-SCI/data2/Pcluster/models/FCIDUMP'
+python -m haar_q -i examples/pcluster/input.yaml "files.fcidump=$fcidump" --show-input
+python -m haar_q -i examples/pcluster/input.yaml "files.fcidump=$fcidump"
+```
+
+Set `method=vmc` for the expanded-space energy objective or `method=excited states.roots=2`
+for the two lowest selected-space energies. To run on one GPU, pass `'common.gpu_devices=[0]'`.
+The example's four seeds and two Krylov steps exercise the calculation path. To study
+energy convergence, increase the seed count, expansion count, selected-space size and
+cycle count, and compare energies between runs. For excited states, inspect both the
+energy gaps and the projected residuals in `ROOTS`. The repository does not distribute
+the P-cluster integrals.
+
+On a two-GPU node with pytest installed, run the single-/two-GPU numerical checks
+from the checkout:
+
+```bash
+python -m pytest -q tests/parallel_hamiltonian_test.py tests/parallel_wavefunction_test.py tests/parallel_forces_test.py tests/selected_states_test.py tests/gpu_workflow_test.py
+```
+
 #### Running from Windows PowerShell with WSL
 
 If HAAR-Q is installed in the Ubuntu virtual environment `~/.venvs/haar-q`,

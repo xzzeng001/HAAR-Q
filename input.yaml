@@ -8,7 +8,8 @@ defaults:
   - _self_             # The settings in this file take precedence over the module defaults.
 
 common:
-  device: cpu
+  device: cpu              # cpu, cuda or cuda:<primary visible ordinal>.
+  gpu_devices: []          # Single process on one node. Use [0, 1] with device: cuda for two GPUs.
   dtype: float64
   max_relative_step: 2      # New outer cycles to run. Set null to use an absolute limit instead.
   max_absolute_step: null   # Stop at this total cycle number, including earlier checkpoint cycles.

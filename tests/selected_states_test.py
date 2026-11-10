@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from haar_q.algorithms.haar import _DynamicLanczos
-from haar_q.algorithms.selected_states import solve_selected_states
+from haar_q.algorithms.selected_states import _block_rayleigh_ritz, solve_selected_states
 from haar_q.utility.reporting import CycleResult, calculation_report
 
 
@@ -45,6 +45,41 @@ def test_matrix_free_solver_recovers_repeated_lowest_root() -> None:
     assert max(residuals) < 1e-8
     with pytest.raises(ValueError, match="one fifth"):
         solve_selected_states(model, configs, roots=27)
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"))],
+)
+def test_device_block_iteration_with_disconnected_complex_spectrum(device: str) -> None:
+    # Two identical coupled blocks have repeated low eigenvalues. The long positive diagonal
+    # exercises Krylov restarts while a two-by-two reference supplies the exact roots.
+    dimension = 140
+    configs = torch.arange(dimension, dtype=torch.uint8, device=device).reshape(-1, 1)
+    diagonal = torch.arange(dimension, dtype=torch.float64, device=device)
+    diagonal[:4] = torch.tensor([-2, 1, -2, 1], dtype=diagonal.dtype, device=device)
+    coupling = 0.8j
+
+    def multiply(v: torch.Tensor) -> torch.Tensor:
+        assert v.device == configs.device
+        result = diagonal * v
+        result[:4:2] += coupling * v[1:4:2]
+        result[1:4:2] += coupling.conjugate() * v[:4:2]
+        return result
+
+    model = Mock()
+    model.apply_within.side_effect = lambda src, v, dst: multiply(v)
+    if device == "cpu":
+        energies, vectors = _block_rayleigh_ritz(model, configs, 3, 5e-9)
+    else:
+        states, _ = solve_selected_states(model, configs, 3)
+        energies = torch.stack([e for e, _, _ in states])
+        vectors = torch.stack([v for _, _, v in states], dim=1)
+    pair = torch.linalg.eigvalsh(torch.tensor([[-2, coupling], [coupling.conjugate(), 1]], dtype=vectors.dtype))
+    torch.testing.assert_close(energies.cpu(), pair[[0, 0, 1]], atol=1e-9, rtol=0)
+    torch.testing.assert_close(vectors.mH @ vectors, torch.eye(3, dtype=vectors.dtype, device=device))
+    for energy, column in zip(energies, vectors.T):
+        assert torch.linalg.vector_norm(multiply(column) - energy * column).item() < 1e-8
 
 
 def test_lanczos_breakdown_can_reach_disconnected_determinant() -> None:

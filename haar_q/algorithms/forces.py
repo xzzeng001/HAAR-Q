@@ -75,14 +75,50 @@ def _orbital_response(mf: Any, fock_ao: np.ndarray, overlap_ao: np.ndarray) -> n
     return u
 
 
-def _gradient(model: Model, dm1: np.ndarray, dm2: np.ndarray) -> np.ndarray:
+class _TwoElectronGradient:
+    """Transform the two-body density and contract ERI derivatives in first-index slabs."""
+
+    def __init__(self, c: np.ndarray, eri: np.ndarray, dm2: np.ndarray, devices: tuple[torch.device, ...]) -> None:
+        self.ao_slabs: list[tuple[int, int, torch.Tensor]] = []
+        orbital_rows = []
+        for device, indices in zip(devices, np.array_split(np.arange(len(c)), min(len(c), len(devices)))):
+            start, stop = int(indices[0]), int(indices[-1]) + 1
+            coeff = torch.as_tensor(c).to(device, non_blocking=True)
+            density = torch.as_tensor(dm2).to(device, non_blocking=True)
+            eri_rows = torch.as_tensor(eri[start:stop]).to(device, non_blocking=True)
+            # Transform p -> a for this AO slab, then q,r,s -> b,c,d in that order.
+            slab = torch.tensordot(coeff[start:stop], density, dims=([1], [0]))
+            for _ in range(3):
+                slab = torch.tensordot(slab, coeff, dims=([1], [1]))
+            self.ao_slabs.append((start, stop, slab))
+            orbital_rows.append(eri_rows.flatten(1) @ density.flatten(1).T)
+        self.orbital_derivative = torch.cat([rows.cpu() for rows in orbital_rows]).numpy()
+
+    def contract(self, derivatives: np.ndarray, p0: int, p1: int) -> np.ndarray:
+        if p0 == p1:
+            return np.zeros(derivatives.shape[0], dtype=derivatives.dtype)
+        contributions = []
+        for start, stop, slab in self.ao_slabs:
+            lo, hi = max(start, p0), min(stop, p1)
+            if lo < hi:
+                local = torch.as_tensor(derivatives[:, lo - p0 : hi - p0]).to(slab.device, non_blocking=True)
+                contributions.append(torch.einsum("xpqrs,pqrs->x", local, slab[lo - start : hi - start]))
+        return torch.stack([term.cpu() for term in contributions]).sum(dim=0).numpy()
+
+
+def _gradient(model: Model, dm1: np.ndarray, dm2: np.ndarray, devices: tuple[torch.device, ...] = ()) -> np.ndarray:
     mf = model.mean_field
     mol, c = mf.mol, mf.mo_coeff
     h1, eri = model.integrals.h1e, model.integrals.eri
     dm1_ao = c @ dm1 @ c.T
-    dm2_ao = np.einsum("ap,bq,cr,ds,pqrs->abcd", c, c, c, c, dm2, optimize=True)
+    two_body = _TwoElectronGradient(c, eri, dm2, devices) if devices else None
+    if two_body is None:
+        dm2_ao = np.einsum("ap,bq,cr,ds,pqrs->abcd", c, c, c, c, dm2, optimize=True)
+        orbital_2e = np.einsum("pjkl,qjkl->pq", eri, dm2, optimize=True)
+    else:
+        orbital_2e = two_body.orbital_derivative
     # Differentiating the four MO coefficients in (pq|rs) leaves four equal contributions.
-    orbital_derivative = 2 * (h1 @ dm1 + np.einsum("pjkl,qjkl->pq", eri, dm2, optimize=True))
+    orbital_derivative = 2 * (h1 @ dm1 + orbital_2e)
     grad = mf.nuc_grad_method()
     derivative_hcore = grad.hcore_generator(mol)
     bra_overlap = grad.get_ovlp(mol)
@@ -97,13 +133,19 @@ def _gradient(model: Model, dm1: np.ndarray, dm2: np.ndarray) -> np.ndarray:
         # int2e_ip1 differentiates the first AO with respect to electron
         # position. Its derivative with respect to the AO center has opposite sign.
         d_eri = mol.intor("int2e_ip1", comp=3, shls_slice=(sh0, sh1, 0, mol.nbas, 0, mol.nbas, 0, mol.nbas))
-        result[atom] -= 2 * np.einsum("xpqrs,pqrs->x", d_eri, dm2_ao[p0:p1])
+        if two_body is None:
+            contribution = np.einsum("xpqrs,pqrs->x", d_eri, dm2_ao[p0:p1])
+        else:
+            contribution = two_body.contract(d_eri, p0, p1)
+        result[atom] -= 2 * contribution
     if not np.isfinite(result).all():
         raise RuntimeError("The analytical gradient contains non-finite entries.")
     return result
 
 
-def selected_forces(model: Model, configs: torch.Tensor, root: int) -> tuple[float, np.ndarray]:
+def selected_forces(
+    model: Model, configs: torch.Tensor, root: int, *, gpu_devices: tuple[int, ...] = ()
+) -> tuple[float, np.ndarray]:
     """Return an isolated projected root's total energy (Eh) and negative nuclear gradient (Eh/bohr)."""
     if model.n_spins != 0 or model.n_electrons == 0:
         raise ValueError("Analytical forces currently require a closed-shell RHF reference with electrons.")
@@ -130,7 +172,8 @@ def selected_forces(model: Model, configs: torch.Tensor, root: int) -> tuple[flo
     check_energy = mo.nuclear_repulsion + np.sum(mo.h1e * dm1) + 0.5 * np.sum(mo.eri * dm2)
     if abs(check_energy - energy) > 1e-8:
         raise RuntimeError("The state RDM and selected Hamiltonian energies disagree.")
-    return energy, -_gradient(model, dm1, dm2)
+    devices = tuple(torch.device("cuda", i) for i in gpu_devices) or ((configs.device,) if configs.is_cuda else ())
+    return energy, -_gradient(model, dm1, dm2, devices)
 
 
 @dataclass
@@ -152,7 +195,9 @@ class ForcesConfig:
         model = context.create_model(runtime_config.model)
         if not isinstance(model, Model) or not model.matches_orbital_identity(identity):
             raise ValueError("The checkpoint must identify the same molecular geometry, basis and canonical orbitals.")
-        energy, forces = selected_forces(model, haar["pool"][0].to(context.device), self.root)
+        energy, forces = selected_forces(
+            model, haar["pool"][0].to(context.device), self.root, gpu_devices=context.gpu_devices
+        )
         mol = model.mean_field.mol
         lines = [
             f"# Fixed-space SCI root {self.root}   total energy {energy:.14f} Eh",

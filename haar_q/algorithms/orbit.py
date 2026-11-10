@@ -147,7 +147,9 @@ def _load_orbital_model(
         path = pathlib.Path(saved_path)
         if path.is_file():
             logging.info("Loading the saved orbital basis from %s", path)
-            return OptimizedModel(OptimizedModelConfig(model_path=path))
+            model = OptimizedModel(OptimizedModelConfig(model_path=path))
+            context.configure_model_devices(model)
+            return model
         if config.name == "geometry":
             raise FileNotFoundError(f"The checkpoint's orbital basis is required for this geometry job: {path}")
         logging.warning("Saved model path %s not found. Falling back to initial config.", path)

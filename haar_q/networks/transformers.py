@@ -150,7 +150,8 @@ class DecoderUnit(torch.nn.Module):
         x = self.norm2(y)
 
         if self.training:
-            self.accumulater = self.accumulater + similarity.sum([0, 1])
+            # Routing statistics are checkpoint data, independent of wavefunction gradients.
+            self.accumulater = self.accumulater + similarity.detach().sum([0, 1])
             self.count = self.count + similarity.size(0) * similarity.size(1)
 
         return x, result_cache
@@ -435,8 +436,8 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         amplitude = self._normalize_amplitude(amplitude)
 
         # batch/sites_indices: batch_size * sites
-        batch_indices: torch.Tensor = torch.arange(batch_size).unsqueeze(1).expand(-1, self.sites)
-        sites_indices: torch.Tensor = torch.arange(self.sites).unsqueeze(0).expand(batch_size, -1)
+        batch_indices: torch.Tensor = torch.arange(batch_size, device=x.device).unsqueeze(1).expand(-1, self.sites)
+        sites_indices: torch.Tensor = torch.arange(self.sites, device=x.device).unsqueeze(0).expand(batch_size, -1)
 
         # selected_amplitude/phase: batch_size * sites
         x_int32: torch.Tensor = x.to(dtype=torch.int32)
@@ -868,8 +869,8 @@ class WaveFunctionElectron(torch.nn.Module):
         amplitude = self._normalize_amplitude(amplitude)
 
         # batch/sites_indices: batch_size * sites
-        batch_indices: torch.Tensor = torch.arange(batch_size).unsqueeze(1).expand(-1, self.sites)
-        sites_indices: torch.Tensor = torch.arange(self.sites).unsqueeze(0).expand(batch_size, -1)
+        batch_indices: torch.Tensor = torch.arange(batch_size, device=x.device).unsqueeze(1).expand(-1, self.sites)
+        sites_indices: torch.Tensor = torch.arange(self.sites, device=x.device).unsqueeze(0).expand(batch_size, -1)
 
         # selected_amplitude/phase: batch_size * sites
         x_int32: torch.Tensor = x.to(dtype=torch.int32)
@@ -1251,8 +1252,8 @@ class WaveFunctionNormal(torch.nn.Module):
         amplitude = self._normalize_amplitude(amplitude)
 
         # batch/sites_indices: batch_size * sites
-        batch_indices: torch.Tensor = torch.arange(batch_size).unsqueeze(1).expand(-1, self.sites)
-        sites_indices: torch.Tensor = torch.arange(self.sites).unsqueeze(0).expand(batch_size, -1)
+        batch_indices: torch.Tensor = torch.arange(batch_size, device=x.device).unsqueeze(1).expand(-1, self.sites)
+        sites_indices: torch.Tensor = torch.arange(self.sites, device=x.device).unsqueeze(0).expand(batch_size, -1)
 
         # selected_amplitude/phase: batch_size * sites
         x_int32: torch.Tensor = x.to(dtype=torch.int32)

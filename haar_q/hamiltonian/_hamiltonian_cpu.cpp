@@ -434,7 +434,7 @@ void find_relative_kernel_interface(
     }
 }
 
-template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
+template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut, bool return_pool = false>
 auto find_relative_interface(
     const torch::Tensor& configs,
     const torch::Tensor& psi,
@@ -526,6 +526,11 @@ auto find_relative_interface(
         /*heap_size=*/count_selected
     );
 
+    // Distributed selection needs the top individual paths (including repeated destinations).
+    if constexpr (return_pool) {
+        return result_pool;
+    }
+
     // Here, the bytes before sizeof(double) / sizeof(std::uint8_t) in result_pool are weights, and the bytes after are configs
     // We need to remove items with weight 0, then sort and deduplicate the configs
 
@@ -570,21 +575,17 @@ struct dictionary_tree {
     }
 
     template<std::int64_t n_total_qubytes>
-    void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
-        std::uint64_t size_counter = 0;
+    void collect(
+        std::int64_t& row,
+        std::array<std::uint8_t, n_total_qubytes>& prefix,
+        std::array<std::uint8_t, n_total_qubytes>* configs,
+        std::array<double, 2>* psi
+    ) {
         for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
-                std::uint64_t new_size_counter = size_counter + children[i]->nonzero_count;
-                if (new_size_counter > index) {
-                    std::uint64_t new_index = index - size_counter;
-                    configs[index][n_total_qubytes - n_qubytes] = i;
-                    children[i]->template collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
-                    if (--children[i]->nonzero_count == 0) {
-                        free(children[i]);
-                    };
-                    return;
-                }
-                size_counter = new_size_counter;
+                prefix[n_total_qubytes - n_qubytes] = i;
+                children[i]->template collect<n_total_qubytes>(row, prefix, configs, psi);
+                free(children[i]);
             }
         }
     }
@@ -610,17 +611,18 @@ struct dictionary_tree<1> {
     }
 
     template<std::int64_t n_total_qubytes>
-    void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
-        std::uint64_t size_counter = 0;
+    void collect(
+        std::int64_t& row,
+        std::array<std::uint8_t, n_total_qubytes>& prefix,
+        std::array<std::uint8_t, n_total_qubytes>* configs,
+        std::array<double, 2>* psi
+    ) {
         for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
-                if (size_counter == index) {
-                    configs[index][n_total_qubytes - 1] = i;
-                    psi[index][0] = values[i][0];
-                    psi[index][1] = values[i][1];
-                    return;
-                }
-                ++size_counter;
+                prefix[n_total_qubytes - 1] = i;
+                configs[row] = prefix;
+                psi[row] = {values[i][0], values[i][1]};
+                ++row;
             }
         }
     }
@@ -799,13 +801,13 @@ auto list_relative_interface(
     auto result_configs = torch::zeros({result_size, n_qubytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     auto result_psi = torch::zeros({result_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU));
 
-    for (std::int64_t i = 0; i < result_size; ++i) {
-        result_tree->template collect<n_qubytes>(
-            i,
-            reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(result_configs.data_ptr()),
-            reinterpret_cast<std::array<double, 2>*>(result_psi.data_ptr())
-        );
-    }
+    std::int64_t row = 0;
+    std::array<std::uint8_t, n_qubytes> prefix{};
+    result_tree->template collect<n_qubytes>(
+        row, prefix,
+        reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(result_configs.data_ptr()),
+        reinterpret_cast<std::array<double, 2>*>(result_psi.data_ptr())
+    );
 
     free(result_tree);
     return std::make_tuple(result_configs, result_psi);
@@ -937,6 +939,7 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
 TORCH_LIBRARY_IMPL(HAAR_Q_LIBRARY(N_QUBYTES, PARTICLE_CUT), CPU, m) {
     m.impl("apply_within", apply_within_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("find_relative", find_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
+    m.impl("relative_candidate_pool", find_relative_interface<4, N_QUBYTES, PARTICLE_CUT, true>);
     m.impl("list_relative", list_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("diagonal_term", diagonal_term_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
 }

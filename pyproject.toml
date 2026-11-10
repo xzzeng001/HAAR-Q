@@ -63,6 +63,7 @@ include = ["haar_q*"]
 
 [tool.setuptools.data-files]
 "share/haar-q" = ["input.yaml"]
+"share/haar-q/examples/pcluster" = ["examples/pcluster/input.yaml"]
 "share/haar-q/examples/h2" = ["examples/h2/H2.xyz"]
 "share/haar-q/examples/hamiltonians" = ["examples/hamiltonians/H2.FCIDUMP"]
 
