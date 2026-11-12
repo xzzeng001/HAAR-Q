@@ -10,7 +10,20 @@ import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+from ..utility.model_dict import ModelProto, NetworkProto
 from ..utility.reporting import CycleResult
+
+
+def _projected_energy_residual(psi: torch.Tensor, hpsi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use one global norm for the entire selected configuration space."""
+    with torch.no_grad():
+        state = psi.detach()
+        norm = torch.vdot(state, state).real
+        if not torch.isfinite(norm) or norm <= 0:
+            raise ValueError("The wavefunction must have a finite, positive norm on the selected configurations.")
+        energy = torch.vdot(state, hpsi.detach()).real / norm
+        residual = (hpsi.detach() - energy * state) / norm
+    return energy, residual
 
 
 def _projected_energy_loss(psi: torch.Tensor, hpsi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -21,15 +34,41 @@ def _projected_energy_loss(psi: torch.Tensor, hpsi: torch.Tensor) -> tuple[torch
     need not support autograd: the detached residual supplies both terms of
     the Rayleigh-quotient derivative, including the factor of two.
     """
-    with torch.no_grad():
-        state = psi.detach()
-        norm = torch.vdot(state, state).real
-        if not torch.isfinite(norm) or norm <= 0:
-            raise ValueError("The wavefunction must have a finite, positive norm on the selected configurations.")
-        energy = torch.vdot(state, hpsi.detach()).real / norm
-        residual = (hpsi.detach() - energy * state) / norm
+    energy, residual = _projected_energy_residual(psi, hpsi)
     loss = 2 * torch.vdot(psi, residual).real
     return energy, loss
+
+
+def _batched_projected_backward(
+    network: NetworkProto, model: ModelProto, configs: torch.Tensor, batch_size: int
+) -> torch.Tensor:
+    """Accumulate the exact gradient while retaining only one chunk's graph.
+
+    Amplitudes must be deterministic and independent across configurations,
+    as in the built-in MLP, Transformer and MPS networks. The full amplitude
+    vector and Hamiltonian action remain in memory; only activations are batched.
+    """
+    module = typing.cast(torch.nn.Module, network)
+    with torch.no_grad():
+        # The recomputation pass supplies the single set of persisted router statistics.
+        routing = {
+            name: value.clone()
+            for name, value in module.named_buffers()
+            if name.rsplit(".", 1)[-1] in {"accumulater", "count"}
+        }
+        try:
+            psi = torch.cat([network(chunk) for chunk in torch.split(configs, batch_size)])
+        finally:
+            for name, value in module.named_buffers():
+                if name in routing:
+                    value.copy_(routing[name])
+        hpsi = model.apply_within(configs, psi, configs)
+        energy, residual = _projected_energy_residual(psi, hpsi)
+        del psi, hpsi
+    for chunk, residual_chunk in zip(torch.split(configs, batch_size), torch.split(residual, batch_size), strict=True):
+        loss = 2 * torch.vdot(network(chunk), residual_chunk).real
+        loss.backward()  # type: ignore[no-untyped-call]
+    return energy
 
 
 @dataclasses.dataclass
@@ -48,6 +87,8 @@ class VmcConfig:
     unique: bool = True
     # Optimize on the entire expanded support; False restores the legacy objective
     hamiltonian_guided: bool = True
+    # Maximum amplitude configurations per forward/backward pass; zero keeps the original full batch
+    amplitude_batch_size: int = 0
 
     def __post_init__(self) -> None:
         if self.sampling_count <= 0:
@@ -56,6 +97,10 @@ class VmcConfig:
             raise ValueError("relative_count must be nonnegative.")
         if self.local_step <= 0:
             raise ValueError("local_step must be positive.")
+        if type(self.amplitude_batch_size) is not int or self.amplitude_batch_size < 0:
+            raise ValueError("amplitude_batch_size must be a nonnegative integer (0 disables batching).")
+        if self.amplitude_batch_size and not self.hamiltonian_guided:
+            raise ValueError("amplitude_batch_size requires hamiltonian_guided=True.")
 
     def main(
         self,
@@ -79,12 +124,13 @@ class VmcConfig:
 
         logging.info(
             "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Unique: %s, "
-            "Hamiltonian Guided: %s",
+            "Hamiltonian Guided: %s, Amplitude Batch Size: %d",
             self.sampling_count,
             self.relative_count,
             self.local_step,
             self.unique,
             self.hamiltonian_guided,
+            self.amplitude_batch_size,
         )
 
         if "vmc" not in data:
@@ -134,6 +180,8 @@ class VmcConfig:
             def closure() -> torch.Tensor:
                 # Optimizing energy
                 optimizer.zero_grad()
+                if self.amplitude_batch_size:
+                    return _batched_projected_backward(network, model, configs_src, self.amplitude_batch_size)
                 psi_src = network(configs_src)
                 if self.hamiltonian_guided:
                     with torch.no_grad():

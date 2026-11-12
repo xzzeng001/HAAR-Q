@@ -14,3 +14,4 @@ options:
       optimizer_steps: ${training.optimizer_steps}       # Wavefunction optimizer steps per outer cycle.
       unique_seeds: ${sampling_control.unique_seeds}     # Draw unique seeds. False samples with replacement and coalesces duplicates.
       hamiltonian_guided: true                           # Use the selected-space Rayleigh quotient. False selects the legacy estimator.
+      amplitude_batch_size: 0                            # Maximum configurations per amplitude pass; 0 keeps the full batch. Requires hamiltonian_guided.

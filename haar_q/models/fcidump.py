@@ -187,11 +187,12 @@ class Model(ModelProto[ModelConfig]):
             (n_orbit, n_electron, n_spin), _ = read_fcidump(model_path, headonly=True)
             logging.info("FCIDUMP metadata successfully loaded")
 
-            logging.info("Loading FCIDUMP Hamiltonian from cache")
-            packed_hamiltonian = torch.load(cache_file, map_location="cpu", weights_only=True)
-            logging.info("FCIDUMP Hamiltonian successfully loaded")
-
+            logging.info("Mapping FCIDUMP Hamiltonian from cache")
+            # Private mappings keep the cache immutable and let the OS reclaim clean
+            # CPU pages under memory pressure without a separate anonymous copy.
+            packed_hamiltonian = torch.load(cache_file, map_location="cpu", weights_only=True, mmap=True)
             self.hamiltonian = Hamiltonian(packed_hamiltonian, kind="fermi")
+            logging.info("FCIDUMP Hamiltonian successfully loaded")
         else:
             logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_path)
             (n_orbit, n_electron, n_spin), integrals = _load_integrals(model_path)
@@ -200,6 +201,7 @@ class Model(ModelProto[ModelConfig]):
 
             logging.info("Packing restricted spatial integrals into normal-ordered Hamiltonian terms")
             self.hamiltonian = Hamiltonian(_packed_terms(integrals), kind="fermi")
+            del integrals
             self.hamiltonian._sort_site_kind_coef()
             logging.info("Internal Hamiltonian representation has been successfully created")
 

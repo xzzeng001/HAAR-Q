@@ -108,9 +108,12 @@ __device__ std::pair<bool, bool> hamiltonian_apply_kernel(
         }
         set_bit(&current_configs[site_single / 8], site_single % 8, to_what);
         if constexpr (particle_cut == 1) {
-            for (std::int16_t s = 0; s < site_single; ++s) {
-                parity ^= get_bit(&current_configs[s / 8], s % 8);
+            // XOR preserves parity: reduce whole bytes, then mask the partial byte.
+            unsigned int prefix = current_configs[site_single / 8] & ((1u << (site_single % 8)) - 1);
+            for (std::int16_t byte = 0; byte < site_single / 8; ++byte) {
+                prefix ^= current_configs[byte];
             }
+            parity ^= __popc(prefix) & 1;
         }
     }
     return std::make_pair(success, parity);

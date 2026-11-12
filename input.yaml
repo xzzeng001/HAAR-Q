@@ -54,7 +54,9 @@ forces:                            # method=forces: fixed-space nuclear forces f
 # Module-specific settings can coexist here. Only selected modules participate in the job.
 options:
   method:
-    vmc: {hamiltonian_guided: true}    # Expand the basis and minimize its projected energy without Lanczos.
+    vmc:
+      hamiltonian_guided: true       # Expand the basis and minimize its projected energy without Lanczos.
+      amplitude_batch_size: 0        # 0 uses a full batch. A positive limit bounds VMC activation memory.
     haar: {krylov_iteration: 1}        # Lanczos steps beyond the initial vector in the H2 example.
   ansatz:
     mlp: {hidden: [16]}                # Hidden layer widths.

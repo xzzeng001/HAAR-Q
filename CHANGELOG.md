@@ -1,5 +1,20 @@
 # HAAR-Q changelog
 
+## 0.7.0
+
+0.6.0 → 0.7.0 (MINOR). Projected VMC gains an optional bounded-memory
+backward pass, alongside native Hamiltonian and FCIDUMP memory improvements.
+
+- Set `options.method.vmc.amplitude_batch_size` to a positive determinant
+  count to bound saved network activations. Energy normalization uses the
+  entire selected basis, and gradients accumulate before each optimizer step.
+  The default value 0 evaluates the whole batch in one pass.
+- CPU and CUDA kernels compute fermionic signs with packed-bit parity and
+  population-count operations.
+- FCIDUMP caches use memory-mapped tensor storage to avoid eagerly allocating
+  a complete CPU copy. Detailed measurements and their scope appear in
+  [the performance notes](docs/performance.md).
+
 ## 0.6.0
 
 0.5.0 → 0.6.0 (MINOR). HAAR-Q gains a single-process, single-node multi-GPU

@@ -1,13 +1,16 @@
 """Compare direct FCIDUMP packing with the dense OpenFermion convention."""
 
 from pathlib import Path
+import sys
 
 import numpy as np
 import openfermion
 from openfermion.config import EQ_TOLERANCE  # type: ignore[import-untyped]
 import pytest
+import torch
 
 from haar_q.models.fcidump import _load_integrals, _packed_terms, read_fcidump
+from haar_q.models import fcidump
 
 
 @pytest.mark.parametrize("scale", [1.0, EQ_TOLERANCE])
@@ -53,3 +56,50 @@ def test_direct_packing_preserves_normal_order_and_thresholds(tmp_path: Path, sc
         for sites, kinds, value in zip(site, kind, coeff)
     }
     assert packed == terms
+
+
+def test_cached_storage_is_private_and_preserves_v6_terms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutating a loaded tensor must not alter the cache or another model."""
+    path = tmp_path / "FCIDUMP"
+    path.write_text("&FCI NORB=1,NELEC=2,MS2=0,\n/\n0.5 1 1 0 0\n0.25 1 1 1 1\n1.0 0 0 0 0\n")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(fcidump.platformdirs, "user_cache_path", lambda *args: cache)
+    cold = fcidump.Model(fcidump.ModelConfig(path))
+    (cache_file,) = cache.iterdir()
+    assert cache_file.name.endswith("v6")
+    expected_bytes = cache_file.read_bytes()
+    expected_tensors = torch.load(cache_file, weights_only=True)
+    warm = fcidump.Model(fcidump.ModelConfig(path))
+    for model in (cold, warm):
+        for actual, expected in zip(
+            (model.hamiltonian.site, model.hamiltonian.kind, model.hamiltonian.coef), expected_tensors
+        ):
+            assert torch.equal(actual, expected)
+        assert (model.n_qubits, model.n_electrons, model.n_spins) == (2, 2, 0)
+    cold.hamiltonian.coef[0, 0] = 100
+    warm.hamiltonian.coef[0, 0] = 200
+    assert cache_file.read_bytes() == expected_bytes
+    reloaded = fcidump.Model(fcidump.ModelConfig(path))
+    assert torch.equal(reloaded.hamiltonian.coef, expected_tensors[2])
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux exposes mapped-file ownership in /proc")
+def test_warm_model_uses_file_backed_private_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Loading a cache should avoid keeping a second anonymous copy of it."""
+    path = tmp_path / "FCIDUMP"
+    path.write_text("&FCI NORB=1,NELEC=2,MS2=0,\n/\n0.5 1 1 0 0\n")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(fcidump.platformdirs, "user_cache_path", lambda *args: cache)
+    fcidump.Model(fcidump.ModelConfig(path))
+    model = fcidump.Model(fcidump.ModelConfig(path))
+    (cache_file,) = cache.iterdir()
+    address = model.hamiltonian.coef.data_ptr()
+    for line in Path("/proc/self/maps").read_text().splitlines():
+        fields = line.split()
+        lower, upper = (int(value, 16) for value in fields[0].split("-"))
+        if lower <= address < upper:
+            assert fields[1] == "rw-p"
+            assert fields[-1] == str(cache_file)
+            break
+    else:
+        pytest.fail("Hamiltonian coefficient storage has no file mapping")

@@ -42,6 +42,9 @@ published algorithm and is retained in scientific descriptions and citations.
 
 ## Calculations and interfaces
 
+For binary Hamiltonian operations, FCIDUMP cache memory and the optional
+batched VMC backward pass, see the [performance notes](docs/performance.md).
+
 The [standard input](input.yaml) runs molecular VMC as supplied. Set `method`
 to choose a calculation. Each method loads its own parameters and uses the
 model, network and optimizer it needs.
@@ -497,6 +500,13 @@ the `optimizer_steps` optimizer updates. Use `common.max_relative_step` or
 The standard H₂ input requests two seeds and an expanded basis of four.
 The expanded set participates in network backpropagation. Size larger runs
 according to the available memory.
+
+To limit network activation memory, set
+`options.method.vmc.amplitude_batch_size=256` (or another positive chunk size).
+VMC recomputes chunk amplitudes and accumulates gradients using the same
+global energy and normalization before each optimizer update. The default
+0 retains the full batch. Smaller chunks can take more time; see the
+[measured memory and timing tradeoff](docs/performance.md).
 
 With `hamiltonian_guided: true`, `unique_seeds: false` changes how seed states are
 sampled, but sample multiplicities are not used as energy weights: each state
