@@ -50,6 +50,12 @@ class RuntimeContext:
 
     def __post_init__(self) -> None:
         self._report: RunReport | None = None
+        if type(self.checkpoint_interval) is not int or self.checkpoint_interval <= 0:
+            raise ValueError("common.checkpoint_interval must be a positive integer.")
+        for name in ("max_relative_step", "max_absolute_step"):
+            limit = getattr(self, name)
+            if limit is not None and (type(limit) is not int or limit <= 0):
+                raise ValueError(f"common.{name} must be a positive integer or null.")
         if self.gpu_devices:
             if self.device.type != "cuda":
                 raise ValueError("common.gpu_devices requires common.device=cuda or cuda:<primary>.")
@@ -145,6 +151,18 @@ class RuntimeContext:
         logging.info("The checkpoints will be saved every %d steps", self.checkpoint_interval)
         return data
 
+    def cycle_limit_reached(self, action: str, data: dict[str, typing.Any]) -> bool:
+        """Check a resumed iterative job before it samples or overwrites its checkpoint."""
+        if self.max_absolute_step is None:
+            return False
+        if action in {"haar", "imag", "excited", "haar_with_orbit"}:
+            counters = data.get("haar", data.get("imag", {}))
+        elif action in {"vmc", "pretrain", "guide"}:
+            counters = data.get(action, {})
+        else:
+            return False
+        return bool(counters.get("global", 0) >= self.max_absolute_step)
+
     def save(self, data: typing.Any, step: int, *, result: CycleResult | None = None) -> None:
         """
         Save data to checkpoint.
@@ -187,7 +205,7 @@ class RuntimeContext:
         if self.max_relative_step is not None:
             self.max_absolute_step = step + self.max_relative_step - 1
             self.max_relative_step = None
-        if step == self.max_absolute_step:
+        if self.max_absolute_step is not None and step >= self.max_absolute_step:
             logging.info("Reached the maximum step, exiting")
             sys.exit(0)
 
@@ -244,18 +262,22 @@ class RuntimeContext:
             data=omegaconf.OmegaConf.to_container(network_config.params, resolve=True),  # type: ignore[arg-type]
             config=dacite.Config(cast=DACITE_CAST),
         )
-        network: NetworkProto = network_param.create(model)
+        # Built-in networks initialize on the CPU. When their parameters are
+        # being restored, those discarded draws must not advance the sampler.
+        with torch.random.fork_rng(devices=[], enabled=state_dict is not None):
+            network: NetworkProto = network_param.create(model)
         logging.info("Network initialized successfully")
 
+        # load_state_dict copies into the destination tensors. Set the requested
+        # precision first so float64 checkpoints never pass through float32.
+        logging.info("Moving network to device: %s", self.device)
+        assert not isinstance(self.dtype, str)
+        network = network.to(device=self.device, dtype=self.dtype)
         if state_dict is not None:
             logging.info("Loading state dict of the network")
             network.load_state_dict(state_dict)
         else:
             logging.info("Skipping loading state dict of the network")
-
-        logging.info("Moving network to device: %s", self.device)
-        assert not isinstance(self.dtype, str)
-        network = network.to(device=self.device, dtype=self.dtype)
 
         family = network_name.split("/")[0]
         if len(self.gpu_devices) > 1 and family in {"mlp", "transformers", "mps"}:

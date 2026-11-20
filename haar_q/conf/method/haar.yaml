@@ -16,7 +16,7 @@ options:
       krylov_single_extend: false                        # Expand once between two solves. With both flags false, expand between Lanczos steps.
       krylov_iteration: 1                                # Lanczos steps beyond the initial vector. Keep below the available basis dimension.
       krylov_threshold: 1.0e-8                           # Residual-norm threshold for introducing a new orthogonal vector.
-      krylov_period: 256                                 # Add a new orthogonal vector at this interval in the Krylov basis.
+      krylov_period: 256                                 # Refresh residual orthogonality at this interval (0 disables the extra pass).
       krylov_eigen_count: 1                              # Number of lowest Ritz states retained, including the ground state.
       optimizer_steps: ${training.optimizer_steps}       # Maximum network-fit updates per outer cycle.
       local_loss: 1.0e-8                                 # Stop fitting when the loss or its absolute change drops below this threshold.

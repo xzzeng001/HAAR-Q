@@ -14,6 +14,7 @@ import torch
 from ..models.geometry import Model
 from ..utility.action_dict import action_dict
 from ..utility.context import RuntimeContext
+from ..utility.spin_order import spin_order_sign
 from .selected_states import solve_selected_states
 
 
@@ -30,16 +31,12 @@ def _state_rdms(
     bstr, ib = np.unique(beta @ powers, return_inverse=True)
     if len(astr) * len(bstr) > 1_000_000:
         raise ValueError("The force RDM implementation supports at most 1,000,000 selected alpha/beta string pairs.")
-    # Moving all beta creation operators behind all alpha operators introduces
-    # one transposition per occupied beta orbital below an occupied alpha orbital.
-    inversions = (alpha * (beta.cumsum(axis=1) - beta)).sum(axis=1)
-    parity = 1 - 2 * (inversions % 2).astype(np.int64)
     vec = wavefunction.detach().cpu().numpy()
     vec = vec * np.exp(-1j * np.angle(vec[np.argmax(np.abs(vec))]))
     if np.max(np.abs(vec.imag)) > 1e-7:
         raise ValueError("The isolated root must admit a real wavefunction in the canonical RHF basis.")
     ci = np.zeros((len(astr), len(bstr)))
-    ci[ia, ib] = vec.real * parity
+    ci[ia, ib] = vec.real * spin_order_sign(alpha, beta)
     state = selected_ci._as_SCIvector(ci, (astr, bstr))
     dm1, dm2 = selected_ci.SelectedCI().make_rdm12(state, norb, (nocc, nocc))
     # The real Coulomb tensor and all of its total derivatives have pair symmetry.

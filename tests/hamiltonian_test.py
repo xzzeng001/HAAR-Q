@@ -37,6 +37,16 @@ import torch
 
 from haar_q.hamiltonian import Hamiltonian
 
+
+@pytest.mark.parametrize(
+    ("term", "message"),
+    [(((0, 1),) * 5, "at most 4 operators"), (((-1, 1),), "nonnegative"), (((0, 3),), "identity")],
+)
+def test_dictionary_term_bounds(term: tuple[tuple[int, int], ...], message: str) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        Hamiltonian({term: 1.0}, kind="fermi")
+
+
 # ---------------------------------------------------------------------------
 # Fixture
 # ---------------------------------------------------------------------------

@@ -36,10 +36,6 @@ def selected_job(*overrides: str) -> DictConfig:
         (["method=pretrain"], "files.dataset"),
         (["system=openfermion"], "files.molecule"),
         (["method=orbit", "system=hubbard"], "requires a molecular system"),
-        (
-            ["method=haar_with_orbit", "system=optimized_basis", "common.parent_path=prior.pth", "files.fcidump=null"],
-            "files.fcidump",
-        ),
     ],
 )
 def test_incompatible_components_and_missing_inputs(overrides: list[str], message: str) -> None:
@@ -59,6 +55,13 @@ def test_active_options_can_supply_paths_and_shared_controls() -> None:
     assert Path(config.model.params.model_path) == ROOT / "molecule.hdf5"
     assert Path(config.action.params.dataset_path) == ROOT / "target.pt"
     assert config.optimizer.params.lr == 0.04
+
+
+def test_rotated_checkpoint_can_supply_its_own_spatial_integrals() -> None:
+    config = selected_job(
+        "method=haar_with_orbit", "system=optimized_basis", "common.parent_path=prior.pth", "files.fcidump=null"
+    )
+    assert config.action.params.src_fcidump is None
 
 
 def test_pool_processing_uses_existing_run_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,6 +6,9 @@ import logging
 import typing
 import dataclasses
 import omegaconf
+import torch
+from .orbit import _load_orbital_model
+from ..utility.sci_checkpoint import checkpoint_state
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
 
@@ -22,46 +25,36 @@ class PerturbationConfig:
         runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
-        """
-        The main function of two-step optimization process based on imaginary time.
-        """
-
-        model = context.create_model(runtime_config.model)
-        data = checkpoint_data
-
-        if "haar" not in data and "imag" in data:
-            data["haar"] = data.pop("imag")
-        configs, psi = data["haar"]["pool"]
+        """Estimate the Epstein-Nesbet correction on one selected external batch."""
+        model = _load_orbital_model(context, runtime_config.model, checkpoint_data)
+        state = checkpoint_data.get("haar", checkpoint_data.get("imag", {}))
+        configs, psi = checkpoint_state(state)
         configs = configs.to(context.device)
         psi = psi.to(context.device)
-
-        energy0_num = psi.conj() @ model.apply_within(configs, psi, configs)
-        energy0_den = psi.conj() @ psi
-        energy0 = (energy0_num / energy0_den).real.item()
+        norm = torch.vdot(psi, psi).real
+        if not torch.isfinite(norm) or norm <= 0:
+            raise ValueError("Perturbation theory requires a finite, positive CI norm.")
+        energy0 = (torch.vdot(psi, model.apply_within(configs, psi, configs)).real / norm).item()
         logging.info("Current energy is %.8f", energy0)
         logging.info("Reference energy is %.8f", model.ref_energy)
 
-        number = configs.size(0)
-        last_result_number = 0
-        current_target_number = number
-        logging.info("Starting finding relative configurations with %d.", number)
-        while True:
-            other_configs = model.find_relative(configs, psi, current_target_number, configs)
-            current_result_number = other_configs.size(0)
-            logging.info("Found %d relative configurations.", current_result_number)
-            if current_result_number == last_result_number:
-                logging.info("No new configurations found, stopping at %d.", current_result_number)
-                break
-            current_target_number = current_target_number * 2
-            logging.info("Doubling target number to %d.", current_target_number)
-            break
-
-        hamiltonian_psi = model.apply_within(configs, psi, other_configs)
-        energy2_num = (hamiltonian_psi.conj() * hamiltonian_psi).real / (psi.conj() @ psi).real
-        energy2_den = energy0 - model.diagonal_term(other_configs).real
-        energy2 = (energy2_num / energy2_den).sum().item()
-        logging.info("Correct energy is %.8f", energy2)
-        logging.info("Error is reduced from %.8f to %.8f", energy0 - model.ref_energy, energy2 - model.ref_energy)
+        other_configs = model.find_relative(configs, psi, len(configs), configs)
+        logging.info("Found %d external configurations.", len(other_configs))
+        correction = 0.0
+        if len(other_configs):
+            coupling = model.apply_within(configs, psi, other_configs)
+            # A zero coupling contributes nothing, even at a degenerate diagonal energy.
+            coupled = coupling != 0
+            denominator = energy0 - model.diagonal_term(other_configs).real[coupled]
+            if (denominator == 0).any():
+                raise ValueError("PT2 has a coupled external determinant with a zero energy denominator.")
+            correction = ((coupling[coupled].abs().square() / norm) / denominator).sum().item()
+        corrected = energy0 + correction
+        logging.info("Second-order energy correction is %.8f", correction)
+        logging.info("Corrected total energy is %.8f", corrected)
+        logging.info(
+            "Reference error before and after PT2: %.8f, %.8f", energy0 - model.ref_energy, corrected - model.ref_energy
+        )
 
 
 action_dict["pert"] = PerturbationConfig

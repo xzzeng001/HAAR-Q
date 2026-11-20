@@ -16,15 +16,15 @@ from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
-from ..hamiltonian import Hamiltonian
 
 # Import components from haar and orbit
 from .haar import (
     _DynamicLanczos,
+    _fit_amplitudes,
     _sampling_from_last_iteration,
     _merge_pool_from_neural_network_and_pool_from_last_iteration,
 )
-from .orbit import NaturalOrbitCalculator, _load_orbital_model, _spatial_integrals
+from .orbit import NaturalOrbitCalculator, _load_orbital_model, _rotated_basis
 from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
 
 
@@ -86,80 +86,13 @@ class HaarWithOrbitConfig:
         # 3. Reorder U_spatial to be closest to Identity
         # We want to maximize sum(|U_{ii}|^2)
         cost_matrix = -(U_spatial.abs() ** 2).cpu().numpy()
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        # For a square cost matrix the returned rows are ordered 0..n-1.
+        # Apply the same permutation to occupations and orbital columns.
+        _, col_ind = linear_sum_assignment(cost_matrix)
+        U_spatial = U_spatial[:, col_ind]
+        eigvals = eigvals[col_ind]
 
-        # row_ind[i] is matched with col_ind[i]
-        # We want column row_ind[i] of permuted_U to be column col_ind[i] of U_spatial
-        permuted_U = torch.zeros_like(U_spatial)
-        permuted_U[:, row_ind] = U_spatial[:, col_ind]
-        U_spatial = permuted_U
-
-        # 4. Load and Transform SPATIAL Integrals
-        (norb, nelec, nspin), e0, h1, h2 = _spatial_integrals(model, self.src_fcidump)
-
-        device = context.device
-        U_spatial = U_spatial.to(device=device, dtype=torch.complex128)
-        h1 = h1.to(device=device, dtype=torch.complex128)
-        h2 = h2.to(device=device, dtype=torch.complex128)
-
-        # Transform SPATIAL integrals first (preserves spin symmetry)
-        logging.info("Transforming spatial orbital integrals...")
-
-        # Transform h1: h1' = U^† h1 U
-        h1_opt_spatial = U_spatial.conj().T @ h1 @ U_spatial
-
-        # Transform h2: h2'_{abcd} = sum U^*_{pa} U^*_{qb} h2_{pqrs} U_{rc} U_{sd}
-        tmp = torch.einsum("sd,pqrs->pqrd", U_spatial, h2)
-        tmp = torch.einsum("rc,pqrd->pqcd", U_spatial, tmp)
-        tmp = torch.einsum("qb,pqcd->pbcd", U_spatial.conj(), tmp)
-        h2_opt_spatial = torch.einsum("pa,pbcd->abcd", U_spatial.conj(), tmp)
-
-        # 5. Expand transformed spatial integrals to spin-orbital basis
-        # For restricted calculations, alpha and beta use the same spatial orbitals
-        logging.info("Expanding transformed integrals to spin-orbital basis...")
-        h1_so = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h1_so[0::2, 0::2] = h1_opt_spatial  # alpha-alpha
-        h1_so[1::2, 1::2] = h1_opt_spatial  # beta-beta
-
-        h2_so = torch.zeros((2 * norb, 2 * norb, 2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h2_so[0::2, 0::2, 0::2, 0::2] = h2_opt_spatial  # aaaa
-        h2_so[0::2, 1::2, 1::2, 0::2] = h2_opt_spatial  # abba
-        h2_so[1::2, 0::2, 0::2, 1::2] = h2_opt_spatial  # baab
-        h2_so[1::2, 1::2, 1::2, 1::2] = h2_opt_spatial  # bbbb
-
-        # Build spin-orbital unitary for storage (block-diagonal: same U for alpha and beta)
-        U_spin = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        U_spin[0::2, 0::2] = U_spatial  # alpha block
-        U_spin[1::2, 1::2] = U_spatial  # beta block
-
-        # 6. Build Hamiltonian Dict and Save
-        ham_dict: dict[tuple[tuple[int, int], ...], complex] = {}
-        ham_dict[()] = complex(e0)
-
-        h1_indices = torch.nonzero(torch.abs(h1_so) > 1e-12)
-        for p, q in h1_indices:
-            p, q = p.item(), q.item()
-            ham_dict[((p, 1), (q, 0))] = h1_so[p, q].item()
-
-        h2_indices = torch.nonzero(torch.abs(h2_so) > 1e-12)
-        for p, q, r, s in h2_indices:
-            p, q, r, s = p.item(), q.item(), r.item(), s.item()
-            key = ((p, 1), (q, 1), (r, 0), (s, 0))
-            ham_dict[key] = ham_dict.get(key, 0j) + h2_so[p, q, r, s].item()
-
-        site, kind, coef = Hamiltonian._prepare(ham_dict)
-
-        output_data = {
-            "hamiltonian": (site.cpu(), kind.cpu(), coef.cpu()),
-            "n_qubits": 2 * norb,
-            "n_electrons": nelec,
-            "n_spins": nspin,
-            "ref_energy": model.ref_energy if self.src_fcidump is None else 0.0,
-            "rdm_eigvals": eigvals.cpu(),
-            "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary (block-diagonal)
-        }
-        if self.src_fcidump is None:
-            output_data["spatial_integrals"] = (e0, h1_opt_spatial.cpu(), h2_opt_spatial.cpu())
+        output_data = _rotated_basis(model, self.src_fcidump, U_spatial, eigvals)
 
         optimized_path = context.folder() / f"optimized_basis_step_{step}.pt"
         torch.save(output_data, optimized_path)
@@ -294,10 +227,7 @@ class HaarWithOrbitConfig:
             data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
 
             # --- TARGET PSI CALCULATION ---
-            # Update target_psi based on the NEW probabilities (or old ones? technically basis changed)
-            # The 'configs' indices retain their meaning "closest to identity", so we assume
-            # the probability distribution over 'configs' is still roughly valid for the new basis.
-            # We use the summed probability of the subspace from Lanczos as the target.
+            # Fit the root-summed probability distribution in the rotated determinant basis.
             target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
             for _, _, p in lanczos_results:
                 target_prob += (p.conj() * p).real
@@ -311,38 +241,20 @@ class HaarWithOrbitConfig:
             # --- LOCAL OPTIMIZATION ---
             loss_func: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = getattr(losses, self.loss_name)
 
+            reference_config = configs[max_index.reshape(1)]
+
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                total_size = len(configs)
-                batch_size = total_size // self.local_batch_count_loss_function
-                remainder = total_size % self.local_batch_count_loss_function
-                total_loss = 0.0
-                total_psi = []
-                for i in range(self.local_batch_count_loss_function):
-                    if i < remainder:
-                        current_batch_size = batch_size + 1
-                    else:
-                        current_batch_size = batch_size
-                    start_index = i * batch_size + min(i, remainder)
-                    end_index = start_index + current_batch_size
-                    batch_indices = torch.arange(start_index, end_index, device=configs.device, dtype=torch.int64)
-                    psi_batch = target_psi[batch_indices]
-                    batch_indices = torch.cat(
-                        (batch_indices, torch.tensor([max_index], device=configs.device, dtype=torch.int64))
-                    )
-                    batch_configs = configs[batch_indices]
-                    psi = network(batch_configs)
-                    psi_max = psi[-1]
-                    psi = psi[:-1]
-                    psi = psi / psi_max
-                    loss = loss_func(psi, psi_batch)
-                    loss = loss * (current_batch_size / total_size)
-                    loss.backward()  # type: ignore[no-untyped-call]
-                    total_loss += loss.item()
-                    total_psi.append(psi.detach())
-                total_loss_tensor = torch.tensor(total_loss)
-                total_loss_tensor.psi = torch.cat(total_psi)  # type: ignore[attr-defined]
-                return total_loss_tensor
+                loss, _ = _fit_amplitudes(
+                    network,
+                    configs,
+                    target_psi,
+                    reference_config,
+                    self.local_batch_count_loss_function,
+                    loss_func,
+                    backward=True,
+                )
+                return loss
 
             loss: torch.Tensor
             try_index = 0
@@ -382,8 +294,16 @@ class HaarWithOrbitConfig:
                 optimizer.load_state_dict(optimizer_backup)
                 try_index = try_index + 1
 
-            loss = typing.cast(torch.Tensor, torch.enable_grad(closure)())  # type: ignore[no-untyped-call,call-arg]
-            psi: torch.Tensor = loss.psi  # type: ignore[attr-defined]
+            loss, amplitudes = _fit_amplitudes(
+                network,
+                configs,
+                target_psi,
+                reference_config,
+                self.local_batch_count_loss_function,
+                loss_func,
+                backward=False,
+            )
+            psi = torch.cat(amplitudes)
             final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs)) / (psi.conj() @ psi)).real
             logging.info(
                 "Loss: %.10f, Final energy: %.10f, Target energy: %.10f, Reference energy: %.10f, Final error: %.10f",

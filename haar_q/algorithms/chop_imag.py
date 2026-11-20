@@ -7,6 +7,8 @@ import typing
 import dataclasses
 import omegaconf
 import torch.utils.tensorboard
+from .orbit import _load_orbital_model
+from ..utility.sci_checkpoint import checkpoint_state
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
 
@@ -32,7 +34,9 @@ class ChopImagConfig:
         The main function for the subspace chopping.
         """
 
-        model = context.create_model(runtime_config.model)
+        if self.chop_size <= 0:
+            raise ValueError("chop_size must be positive.")
+        model = _load_orbital_model(context, runtime_config.model, checkpoint_data)
         data = checkpoint_data
 
         logging.info(
@@ -41,10 +45,8 @@ class ChopImagConfig:
             self.second_order_magnitude,
         )
 
-        state = data.get("haar", data.get("imag"))
-        if not state or state.get("pool") is None:
-            raise ValueError("chop_imag requires a HAAR-SCI checkpoint containing a configuration pool.")
-        configs, psi = state["pool"]
+        state = data.get("haar", data.get("imag", {}))
+        configs, psi = checkpoint_state(state)
         configs = configs.to(device=context.device)
         psi = psi.to(device=context.device)
 

@@ -5,6 +5,7 @@ This file implements a MLP network from https://arxiv.org/pdf/2109.12606.
 import itertools
 import torch
 from ..utility.bitspack import pack_int, unpack_int
+from .sampling import select_children
 
 
 class FakeLinear(torch.nn.Module):
@@ -165,12 +166,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         """
         Normalize the log amplitude of incomplete configurations.
         """
-        # x: batch_size * 2 * 2
-        # param: batch_size
-        param = (2 * x).exp().sum(dim=[-2, -1]).log() / 2
-        x = x - param.unsqueeze(-1).unsqueeze(-1)
-        # 1 = param = sqrt(sum(x.exp()^2)) now
-        return x
+        return (0.5 * torch.log_softmax(2 * x.flatten(-2), dim=-1)).reshape_as(x)
 
     @torch.jit.export
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -257,51 +253,12 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
             # Normalize the delta amplitude.
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
-            # The delta unperturbed prob for all batch and 4 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 4])  # noqa: E741
-            # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
-            # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
-            # Get max perturbed prob
-            Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
-            # Evaluate the conditioned prob
-            tildeL: torch.Tensor = -torch.log(
-                torch.exp(-perturbed_probability.view([local_batch_size, 1])) - torch.exp(-Z) + torch.exp(-L)
+            parent, local_state, unperturbed_probability, perturbed_probability = select_children(
+                normalized_delta_amplitude, unperturbed_probability, perturbed_probability, batch_size
             )
-
-            # Calculate appended configurations for 4 adds
-            # local_batch_size * current_site * 2 + local_batch_size * 1 * 2
-            x0: torch.Tensor = torch.cat(
-                [x, torch.tensor([[0, 0]], device=device, dtype=torch.uint8).expand(local_batch_size, -1, -1)], dim=1
-            )
-            x1: torch.Tensor = torch.cat(
-                [x, torch.tensor([[0, 1]], device=device, dtype=torch.uint8).expand(local_batch_size, -1, -1)], dim=1
-            )
-            x2: torch.Tensor = torch.cat(
-                [x, torch.tensor([[1, 0]], device=device, dtype=torch.uint8).expand(local_batch_size, -1, -1)], dim=1
-            )
-            x3: torch.Tensor = torch.cat(
-                [x, torch.tensor([[1, 1]], device=device, dtype=torch.uint8).expand(local_batch_size, -1, -1)], dim=1
-            )
-
-            # Cat all configurations to get x : new_local_batch_size * (current_size+1) * 2
-            # (un)perturbed prob : new_local_batch_size
-            x = torch.cat([x0, x1, x2, x3])
-            unperturbed_probability = l.permute(1, 0).reshape([4 * local_batch_size])
-            perturbed_probability = tildeL.permute(1, 0).reshape([4 * local_batch_size])
-
-            # Filter results, only use largest batch_size ones
-            selected = perturbed_probability.argsort(descending=True)[:batch_size]
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
-
-            # If prob = 0, filter it forcibly
-            selected = perturbed_probability.isfinite()
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
+            # Four local states encode (spin up, spin down) in that order.
+            appended = torch.stack((local_state // 2, local_state % 2), dim=-1)[:, None, :]
+            x = torch.cat((x[parent], appended.to(torch.uint8)), dim=1)
 
         # Apply ordering
         x = torch.index_select(x, 1, self.ordering)
@@ -488,12 +445,7 @@ class WaveFunctionElectron(torch.nn.Module):
         """
         Normalize the log amplitude of incomplete configurations.
         """
-        # x: batch_size * 2
-        # param: batch_size
-        param = (2 * x).exp().sum(dim=[-1]).log() / 2
-        x = x - param.unsqueeze(-1)
-        # 1 = param = sqrt(sum(x.exp()^2)) now
-        return x
+        return 0.5 * torch.log_softmax(2 * x, dim=-1)
 
     @torch.jit.export
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -578,45 +530,11 @@ class WaveFunctionElectron(torch.nn.Module):
             # Normalize the delta amplitude.
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
-            # The delta unperturbed prob for all batch and 2 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 2])  # noqa: E741
-            # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
-            # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
-            # Get max perturbed prob
-            Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
-            # Evaluate the conditioned prob
-            tildeL: torch.Tensor = -torch.log(
-                torch.exp(-perturbed_probability.view([local_batch_size, 1])) - torch.exp(-Z) + torch.exp(-L)
+            parent, local_state, unperturbed_probability, perturbed_probability = select_children(
+                normalized_delta_amplitude, unperturbed_probability, perturbed_probability, batch_size
             )
-
-            # Calculate appended configurations for 2 adds
-            # local_batch_size * current_site + local_batch_size * 1
-            x0: torch.Tensor = torch.cat(
-                [x, torch.tensor([0], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
-            )
-            x1: torch.Tensor = torch.cat(
-                [x, torch.tensor([1], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
-            )
-
-            # Cat all configurations to get x : new_local_batch_size * (current_size+1) * 2
-            # (un)perturbed prob : new_local_batch_size
-            x = torch.cat([x0, x1])
-            unperturbed_probability = l.permute(1, 0).reshape([2 * local_batch_size])
-            perturbed_probability = tildeL.permute(1, 0).reshape([2 * local_batch_size])
-
-            # Filter results, only use largest batch_size ones
-            selected = perturbed_probability.argsort(descending=True)[:batch_size]
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
-
-            # If prob = 0, filter it forcibly
-            selected = perturbed_probability.isfinite()
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
+            appended = local_state[:, None]
+            x = torch.cat((x[parent], appended.to(torch.uint8)), dim=1)
 
         # Apply ordering
         x = torch.index_select(x, 1, self.ordering)
@@ -778,12 +696,7 @@ class WaveFunctionNormal(torch.nn.Module):
         """
         Normalize the log amplitude of incomplete configurations.
         """
-        # x: batch_size * 2
-        # param:  batch_size
-        param = (2 * x).exp().sum(dim=[-1]).log() / 2
-        x = x - param.unsqueeze(-1)
-        # 1 = param = sqrt(sum(x.exp()^2)) now
-        return x
+        return 0.5 * torch.log_softmax(2 * x, dim=-1)
 
     @torch.jit.export
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -863,45 +776,11 @@ class WaveFunctionNormal(torch.nn.Module):
             # Normalize the delta amplitude.
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
-            # The delta unperturbed prob for all batch and 2 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 2])  # noqa: E741
-            # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
-            # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
-            # Get max perturbed prob
-            Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
-            # Evaluate the conditioned prob
-            tildeL: torch.Tensor = -torch.log(
-                torch.exp(-perturbed_probability.view([local_batch_size, 1])) - torch.exp(-Z) + torch.exp(-L)
+            parent, local_state, unperturbed_probability, perturbed_probability = select_children(
+                normalized_delta_amplitude, unperturbed_probability, perturbed_probability, batch_size
             )
-
-            # Calculate appended configurations for 2 adds
-            # local_batch_size * current_site + local_batch_size * 1
-            x0: torch.Tensor = torch.cat(
-                [x, torch.tensor([0], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
-            )
-            x1: torch.Tensor = torch.cat(
-                [x, torch.tensor([1], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
-            )
-
-            # Cat all configurations to get x : new_local_batch_size * (current_size+1) * 2
-            # (un)perturbed prob : new_local_batch_size
-            x = torch.cat([x0, x1])
-            unperturbed_probability = l.permute(1, 0).reshape([2 * local_batch_size])
-            perturbed_probability = tildeL.permute(1, 0).reshape([2 * local_batch_size])
-
-            # Filter results, only use largest batch_size ones
-            selected = perturbed_probability.argsort(descending=True)[:batch_size]
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
-
-            # If prob = 0, filter it forcibly
-            selected = perturbed_probability.isfinite()
-            x = x[selected]
-            unperturbed_probability = unperturbed_probability[selected]
-            perturbed_probability = perturbed_probability[selected]
+            appended = local_state[:, None]
+            x = torch.cat((x[parent], appended.to(torch.uint8)), dim=1)
 
         # Apply ordering
         x = torch.index_select(x, 1, self.ordering)

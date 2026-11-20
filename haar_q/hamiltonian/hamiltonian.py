@@ -130,7 +130,7 @@ class Hamiltonian:
         configs_i : torch.Tensor
             A uint8 tensor of shape [batch_size_i, n_qubytes] representing the input configurations.
         psi_i : torch.Tensor
-            A complex64 tensor of shape [batch_size_i] representing the input amplitudes on the given configurations.
+            A complex128 tensor of shape [batch_size_i] representing the input amplitudes on the given configurations.
         configs_j : torch.Tensor
             A uint8 tensor of shape [batch_size_j, n_qubytes] representing the output configurations.
 
@@ -166,7 +166,7 @@ class Hamiltonian:
         configs_i : torch.Tensor
             A uint8 tensor of shape [batch_size, n_qubytes] representing the input configurations.
         psi_i : torch.Tensor
-            A complex64 tensor of shape [batch_size] representing the input amplitudes on the given configurations.
+            A complex128 tensor of shape [batch_size] representing the input amplitudes on the given configurations.
         count_selected : int
             The number of selected configurations to be returned.
         configs_exclude : torch.Tensor, optional
@@ -175,8 +175,10 @@ class Hamiltonian:
         Returns
         -------
         torch.Tensor
-            The resulting configurations after applying the Hamiltonian, only the first `count_selected` configurations are guaranteed to be returned.
-            The order of the configurations is guaranteed to be sorted by estimated psi for the remaining configurations.
+            Unique determinants from up to `count_selected` highest-weight individual
+            paths outside the exclusion set. Paths to the same determinant share a
+            single output row, so the number returned can be smaller than requested.
+            Rows are sorted lexicographically by their packed occupation bytes.
         """
         if count_selected < 0:
             raise ValueError("count_selected must be nonnegative.")
@@ -229,7 +231,7 @@ class Hamiltonian:
         configs_i : torch.Tensor
             Input configurations (uint8).
         psi_i : torch.Tensor
-            Input amplitudes (complex64).
+            Input amplitudes (complex128).
         configs_exclude : torch.Tensor, optional
             Configurations to exclude from the result. Defaults to configs_i.
 
@@ -263,7 +265,7 @@ class Hamiltonian:
         Returns
         -------
         torch.Tensor
-            A complex64 tensor of shape [batch_size] representing the diagonal term of the Hamiltonian for the given configurations.
+            A complex128 tensor of shape [batch_size] representing the diagonal term of the Hamiltonian for the given configurations.
         """
         self._prepare_data(configs.device)
         _diagonal_term = getattr(

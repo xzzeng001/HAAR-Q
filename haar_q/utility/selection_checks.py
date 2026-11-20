@@ -55,7 +55,9 @@ def validate_selection(config: DictConfig) -> None:
             raise ValueError(f"method={method} uses the geometry model integrals. Leave src_fcidump null.")
         if system != "geometry" and system not in _MODEL_FILES:
             raise ValueError(f"method={method} requires a molecular system and matching FCIDUMP integrals.")
-        if system != "geometry" and not params.get("src_fcidump"):
+        # Current optimized-basis files carry their own transformed spatial
+        # integrals. The loader checks for a matching FCIDUMP for older files.
+        if system not in {"geometry", "optimized_basis"} and not params.get("src_fcidump"):
             raise ValueError(f"method={method} requires files.fcidump to point to the matching molecular integrals.")
     if method == "orbit" and not params.get("dst_optimized"):
         raise ValueError("method=orbit requires files.orbital_output for the rotated Hamiltonian.")

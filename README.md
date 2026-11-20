@@ -62,10 +62,12 @@ model, network and optimizer it needs.
 | `pert` | Estimates a second-order contribution from a single batch of external configurations connected to a saved pool. | A HAAR-SCI pool; the logged second-order contribution is an energy correction |
 | `chop_imag` | Ranks and removes configurations in batches and records energy against retained pool size. | A current HAAR-SCI or legacy `imag` pool in `common.parent_path` |
 
-The saved SCI pool carries the square root of the summed probabilities of the
-requested Ritz states. It supplies the amplitudes used by pool post-processing.
-For signed or complex Ritz vectors, read the per-cycle entries in `haar.excited`
-from the checkpoint.
+The SCI sampling pool carries the square root of the summed probabilities
+of the requested Ritz states. PT2, chopping and standalone natural orbitals
+use the signed ground-state vector from the last completed cycle in
+`haar.excited`. For older checkpoints with only a pool, these methods use
+the stored pool amplitudes. If that pool contains only magnitudes, rerun SCI
+to recover a state suitable for phase-sensitive observables.
 
 The native CPU and CUDA kernels apply the Hamiltonian between selected
 configurations, select or enumerate connected configurations and evaluate
@@ -86,7 +88,12 @@ replacement sampling. The SCI sampling methods require a network with unique gen
 two-electron integral arrays and electron counts for a HAAR-SCI calculation.
 It accepts a resolved configuration with explicit component sections, as
 printed by `python -m haar_q -i input.yaml method=haar --show-input`.
-It can return a PySCF-shaped CI array with warm-start data. The underlying
+It returns the lowest Ritz energy and, for supported dense CI sizes, the
+signed coefficients in PySCF alpha/beta string order. Pass the returned
+array as `ci0` for a warm start. Set `common.max_relative_step` to the
+number of additional cycles and leave `common.max_absolute_step` null.
+PySCF's `ecore` keyword and HAAR-Q's `nuclear_repulsion` represent the
+same constant offset. The underlying
 `pyscf` model receives NumPy arrays through Python. For a molecular YAML run,
 select `system=geometry` to compute integrals from coordinates, or load an
 FCIDUMP, OpenFermion MolecularData or optimized-basis file.

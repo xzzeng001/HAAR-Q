@@ -23,3 +23,11 @@ jobs:
         run: pip install '.[dev]'
 
       - uses: pre-commit/action@v3.0.1
+
+      - name: Run CPU scientific regression suite
+        run: python -m pytest -q
+        timeout-minutes: 30
+        env:
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MAX_JOBS: "2"

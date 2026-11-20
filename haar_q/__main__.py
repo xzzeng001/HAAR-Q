@@ -3,6 +3,7 @@
 import argparse
 import copy
 import importlib
+import logging
 import os
 import sys
 from pathlib import Path
@@ -58,6 +59,8 @@ def _prepare_input(config: DictConfig, input_dir: Path | None, *, check: bool = 
 
 
 def _run(runtime_config: DictConfig) -> None:
+    import torch
+
     from .utility.action_dict import create_action
     from .utility.context import DACITE_CAST, RuntimeContext
 
@@ -66,10 +69,13 @@ def _run(runtime_config: DictConfig) -> None:
         data=OmegaConf.to_container(runtime_config.common, resolve=True),  # type: ignore[arg-type]
         config=dacite.Config(cast=DACITE_CAST),
     )
-    with context.reporting(runtime_config):
+    with context.reporting(runtime_config), torch.no_grad():
         run = create_action(runtime_config.action)
         importlib.import_module(f".models.{runtime_config.model.name}", package=__package__)
         checkpoint_data = context.setup()
+        if context.cycle_limit_reached(runtime_config.action.name, checkpoint_data):
+            logging.info("Checkpoint already reached common.max_absolute_step. No further cycles requested.")
+            return
         run.main(context=context, runtime_config=runtime_config, checkpoint_data=checkpoint_data)
 
 

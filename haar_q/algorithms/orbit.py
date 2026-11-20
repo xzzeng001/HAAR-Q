@@ -4,8 +4,6 @@ This file implements orbital optimization (Natural Orbitals) for quantum many-bo
 
 import logging
 import dataclasses
-import re
-import gzip
 import pathlib
 import typing
 import torch
@@ -14,6 +12,7 @@ from ..hamiltonian import Hamiltonian
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
 from ..utility.model_dict import ModelProto
+from ..utility.sci_checkpoint import checkpoint_state
 from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
 
 
@@ -36,113 +35,108 @@ class OrbitConfig:
         runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
-        # 1. Setup and data loading
-        data = checkpoint_data
-
-        if "haar" not in data or "pool" not in data["haar"] or data["haar"]["pool"] is None:
-            raise ValueError("No pool data found in checkpoint under 'haar'. Run HAAR first.")
-
-        if runtime_config.model.name == "geometry":
-            model = _load_orbital_model(context, runtime_config.model, data)
-        else:
-            model = context.create_model(runtime_config.model)
-        configs, psi = data["haar"]["pool"]
+        model = _load_orbital_model(context, runtime_config.model, checkpoint_data)
+        state = checkpoint_data.get("haar", checkpoint_data.get("imag", {}))
+        configs, psi = checkpoint_state(state)
         configs = configs.to(device=context.device)
         psi = psi.to(device=context.device)
 
         n_orbit = typing.cast(typing.Any, model).n_qubits // 2
         calculator = NaturalOrbitCalculator(n_orbit)
 
-        # 2. Calculate spatial 1-RDM and Unitary transformation
         rdm_spatial = calculator.calculate_rdm(configs, psi)
         logging.info("Spatial 1-RDM calculated. Diagonalizing...")
 
-        # Natural orbitals diagonalize the RDM
-        # U_spatial is now a (n_orbit, n_orbit) matrix for spatial orbitals only
         eigvals, U_spatial = torch.linalg.eigh(rdm_spatial)
 
-        # 3. Load spatial integrals in the basis of the saved pool.
-        (norb, nelec, nspin), e0, h1, h2 = _spatial_integrals(model, self.src_fcidump)
-
-        device = context.device
-        U_spatial = U_spatial.to(device=device, dtype=torch.complex128)
-        h1 = h1.to(device=device, dtype=torch.complex128)
-        h2 = h2.to(device=device, dtype=torch.complex128)
-
-        # 4. Transform SPATIAL orbital integrals first, then expand to spin-orbitals
-        # This preserves spin symmetry - same transformation for alpha and beta
-        logging.info("Transforming spatial orbital integrals...")
-
-        # Transform h1: h1' = U^† h1 U
-        h1_opt_spatial = U_spatial.conj().T @ h1 @ U_spatial
-
-        # Transform h2 using sequential contractions: h2'_{abcd} = sum U^*_{pa} U^*_{qb} h2_{pqrs} U_{rc} U_{sd}
-        # This is O(N^5) but correct for 4-index tensor transformation
-        tmp = torch.einsum("sd,pqrs->pqrd", U_spatial, h2)
-        tmp = torch.einsum("rc,pqrd->pqcd", U_spatial, tmp)
-        tmp = torch.einsum("qb,pqcd->pbcd", U_spatial.conj(), tmp)
-        h2_opt_spatial = torch.einsum("pa,pbcd->abcd", U_spatial.conj(), tmp)
-
-        # 5. Expand transformed spatial integrals to spin-orbital basis
-        # For restricted calculations, alpha and beta use the same spatial orbitals
-        logging.info("Expanding transformed integrals to spin-orbital basis...")
-        h1_so = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h1_so[0::2, 0::2] = h1_opt_spatial  # alpha-alpha
-        h1_so[1::2, 1::2] = h1_opt_spatial  # beta-beta
-
-        h2_so = torch.zeros((2 * norb, 2 * norb, 2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h2_so[0::2, 0::2, 0::2, 0::2] = h2_opt_spatial  # aaaa
-        h2_so[0::2, 1::2, 1::2, 0::2] = h2_opt_spatial  # abba
-        h2_so[1::2, 0::2, 0::2, 1::2] = h2_opt_spatial  # baab
-        h2_so[1::2, 1::2, 1::2, 1::2] = h2_opt_spatial  # bbbb
-
-        # Build spin-orbital unitary for storage (block-diagonal: same U for alpha and beta)
-        U_spin = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        U_spin[0::2, 0::2] = U_spatial  # alpha block
-        U_spin[1::2, 1::2] = U_spatial  # beta block
-
-        # 6. Build Hamiltonian dictionary
-        logging.info("Building Hamiltonian dictionary...")
-        ham_dict: dict[tuple[tuple[int, int], ...], complex] = {}
-        ham_dict[()] = complex(e0)
-
-        h1_indices = torch.nonzero(torch.abs(h1_so) > 1e-12)
-        for p, q in h1_indices:
-            p, q = p.item(), q.item()
-            ham_dict[((p, 1), (q, 0))] = h1_so[p, q].item()
-
-        h2_indices = torch.nonzero(torch.abs(h2_so) > 1e-12)
-        for p, q, r, s in h2_indices:
-            p, q, r, s = p.item(), q.item(), r.item(), s.item()
-            key = ((p, 1), (q, 1), (r, 0), (s, 0))
-            ham_dict[key] = ham_dict.get(key, 0j) + h2_so[p, q, r, s].item()
-
-        # 7. Save results
-        logging.info("Preparing and saving optimized basis model...")
-        site, kind, coef = Hamiltonian._prepare(ham_dict)
-
-        output_data = {
-            "hamiltonian": (site.cpu(), kind.cpu(), coef.cpu()),
-            "n_qubits": 2 * norb,
-            "n_electrons": nelec,
-            "n_spins": nspin,
-            "ref_energy": self.ref_energy if self.ref_energy is not None else model.ref_energy,
-            "rdm_eigvals": eigvals.cpu(),
-            "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary matrix
-        }
-        if self.src_fcidump is None:
-            output_data["spatial_integrals"] = (e0, h1_opt_spatial.cpu(), h2_opt_spatial.cpu())
-
+        output_data = _rotated_basis(model, self.src_fcidump, U_spatial, eigvals, self.ref_energy)
         self.dst_optimized.parent.mkdir(parents=True, exist_ok=True)
         torch.save(output_data, self.dst_optimized)
         logging.info("Successfully saved optimized basis to %s", self.dst_optimized)
+
+
+def _rotated_basis(
+    model: ModelProto,
+    src_fcidump: pathlib.Path | None,
+    U_spatial: torch.Tensor,
+    eigvals: torch.Tensor,
+    ref_energy: float | None = None,
+) -> dict[str, typing.Any]:
+    """Rotate one- and two-electron operators and serialize the resulting restricted basis."""
+    (norb, nelec, nspin), e0, h1, h2 = _spatial_integrals(model, src_fcidump)
+
+    device = U_spatial.device
+    U_spatial = U_spatial.to(dtype=torch.complex128)
+    h1 = h1.to(device=device, dtype=torch.complex128)
+    h2 = h2.to(device=device, dtype=torch.complex128)
+
+    logging.info("Transforming spatial orbital integrals...")
+
+    # Transform h1: h1' = U^† h1 U
+    h1_opt_spatial = U_spatial.conj().T @ h1 @ U_spatial
+
+    # Transform h2 using sequential contractions: h2'_{abcd} = sum U^*_{pa} U^*_{qb} h2_{pqrs} U_{rc} U_{sd}
+    # Contract one axis at a time for O(N^5) work.
+    tmp = torch.einsum("sd,pqrs->pqrd", U_spatial, h2)
+    tmp = torch.einsum("rc,pqrd->pqcd", U_spatial, tmp)
+    tmp = torch.einsum("qb,pqcd->pbcd", U_spatial.conj(), tmp)
+    h2_opt_spatial = torch.einsum("pa,pbcd->abcd", U_spatial.conj(), tmp)
+
+    # The same spatial rotation applies to both spin channels.
+    logging.info("Expanding transformed integrals to spin-orbital basis...")
+    h1_so = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
+    h1_so[0::2, 0::2] = h1_opt_spatial  # alpha-alpha
+    h1_so[1::2, 1::2] = h1_opt_spatial  # beta-beta
+
+    h2_so = torch.zeros((2 * norb, 2 * norb, 2 * norb, 2 * norb), dtype=torch.complex128, device=device)
+    h2_so[0::2, 0::2, 0::2, 0::2] = h2_opt_spatial  # aaaa
+    h2_so[0::2, 1::2, 1::2, 0::2] = h2_opt_spatial  # abba
+    h2_so[1::2, 0::2, 0::2, 1::2] = h2_opt_spatial  # baab
+    h2_so[1::2, 1::2, 1::2, 1::2] = h2_opt_spatial  # bbbb
+
+    # Build spin-orbital unitary for storage (block-diagonal: same U for alpha and beta)
+    U_spin = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
+    U_spin[0::2, 0::2] = U_spatial  # alpha block
+    U_spin[1::2, 1::2] = U_spatial  # beta block
+
+    logging.info("Building Hamiltonian dictionary...")
+    ham_dict: dict[tuple[tuple[int, int], ...], complex] = {}
+    ham_dict[()] = complex(e0)
+
+    h1_indices = torch.nonzero(torch.abs(h1_so) > 1e-12)
+    for p, q in h1_indices:
+        p, q = p.item(), q.item()
+        ham_dict[((p, 1), (q, 0))] = h1_so[p, q].item()
+
+    h2_indices = torch.nonzero(torch.abs(h2_so) > 1e-12)
+    for p, q, r, s in h2_indices:
+        p, q, r, s = p.item(), q.item(), r.item(), s.item()
+        key = ((p, 1), (q, 1), (r, 0), (s, 0))
+        ham_dict[key] = ham_dict.get(key, 0j) + h2_so[p, q, r, s].item()
+
+    logging.info("Preparing and saving optimized basis model...")
+    site, kind, coef = Hamiltonian._prepare(ham_dict)
+
+    output_data: dict[str, typing.Any] = {
+        "hamiltonian": (site.cpu(), kind.cpu(), coef.cpu()),
+        "n_qubits": 2 * norb,
+        "n_electrons": nelec,
+        "n_spins": nspin,
+        "ref_energy": ref_energy if ref_energy is not None else model.ref_energy,
+        "rdm_eigvals": eigvals.cpu(),
+        "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary matrix
+    }
+    # The following rotation must start from these transformed coefficients.
+    output_data["spatial_integrals"] = (e0, h1_opt_spatial.cpu(), h2_opt_spatial.cpu())
+
+    return output_data
 
 
 def _load_orbital_model(
     context: RuntimeContext, config: omegaconf.DictConfig, data: dict[str, typing.Any]
 ) -> ModelProto:
     """Resume in the saved orbital basis when the pool came from an orbital SCI cycle."""
-    saved_path = data.get("haar", {}).get("model_path")
+    saved_path = data.get("haar", data.get("imag", {})).get("model_path")
     if saved_path is not None:
         path = pathlib.Path(saved_path)
         if path.is_file():
@@ -150,9 +144,9 @@ def _load_orbital_model(
             model = OptimizedModel(OptimizedModelConfig(model_path=path))
             context.configure_model_devices(model)
             return model
-        if config.name == "geometry":
-            raise FileNotFoundError(f"The checkpoint's orbital basis is required for this geometry job: {path}")
-        logging.warning("Saved model path %s not found. Falling back to initial config.", path)
+        # An explicit optimized-basis input can supply a relocated checkpoint model.
+        if config.name != "optimized_basis":
+            raise FileNotFoundError(f"The checkpoint's orbital basis is required for this calculation: {path}")
     return context.create_model(config)
 
 
@@ -160,13 +154,14 @@ def _spatial_integrals(
     model: ModelProto, src_fcidump: pathlib.Path | None
 ) -> tuple[tuple[int, int, int], float, torch.Tensor, torch.Tensor]:
     """Fetch the one- and two-body coefficients in creation-creation-annihilation-annihilation order."""
-    if src_fcidump is not None:
-        return _read_fcidump_tensors(src_fcidump)
-    if isinstance(model, OptimizedModel):
-        if model.spatial_integrals is None:
-            raise ValueError("The saved orbital basis lacks spatial integrals. Supply its matching FCIDUMP.")
+    if isinstance(model, OptimizedModel) and model.spatial_integrals is not None:
         e0, h1, h2 = model.spatial_integrals
         return (model.n_qubits // 2, model.n_electrons, model.n_spins), e0, h1, h2
+    if src_fcidump is not None:
+        # Legacy optimized-basis files require an FCIDUMP in the saved pool's basis.
+        return _read_fcidump_tensors(src_fcidump)
+    if isinstance(model, OptimizedModel):
+        raise ValueError("The saved orbital basis lacks spatial integrals. Supply its matching FCIDUMP.")
     from ..models.geometry import Model as GeometryModel
 
     if isinstance(model, GeometryModel):
@@ -179,61 +174,19 @@ def _spatial_integrals(
 def _read_fcidump_tensors(
     file_name: pathlib.Path,
 ) -> tuple[tuple[int, int, int], float, torch.Tensor, torch.Tensor]:
-    """
-    Read FCIDUMP file and return raw tensors for h1 and h2.
-    """
-    logging.info("Parsing FCIDUMP file: %s", file_name)
-    with (
-        gzip.open(file_name, "rt", encoding="utf-8")
-        if file_name.name.endswith(".gz")
-        else open(file_name, "rt", encoding="utf-8") as file
-    ):
-        n_orbit: int | None = None
-        n_electron: int | None = None
-        n_spin: int | None = None
-        for line in file:
-            data: str = line.lower()
-            if (match := re.search(r"norb\s*=\s*(\d+)", data)) is not None:
-                n_orbit = int(match.group(1))
-            if (match := re.search(r"nelec\s*=\s*(\d+)", data)) is not None:
-                n_electron = int(match.group(1))
-            if (match := re.search(r"ms2\s*=\s*(\d+)", data)) is not None:
-                n_spin = int(match.group(1))
-            if "&end" in data:
-                break
-        assert n_orbit is not None
-        assert n_electron is not None
-        assert n_spin is not None
+    """Expand restricted FCIDUMP integrals into the orbital rotation convention."""
+    from pyscf import ao2mo  # type: ignore[import-untyped]
 
-        energy_0: float = 0.0
-        energy_1: torch.Tensor = torch.zeros([n_orbit, n_orbit], dtype=torch.float64)
-        energy_2: torch.Tensor = torch.zeros([n_orbit, n_orbit, n_orbit, n_orbit], dtype=torch.float64)
-        for line in file:
-            pieces: list[str] = line.split()
-            if not pieces:
-                continue
-            coefficient: float = float(pieces[0])
-            sites: tuple[int, ...] = tuple(int(i) - 1 for i in pieces[1:])
-            match sites:
-                case (-1, -1, -1, -1):
-                    energy_0 = coefficient
-                case (i, j, -1, -1):
-                    energy_1[i, j] = coefficient
-                    energy_1[j, i] = coefficient
-                case (i, j, k, l):
-                    energy_2[i, j, k, l] = coefficient
-                    energy_2[i, j, l, k] = coefficient
-                    energy_2[j, i, k, l] = coefficient
-                    energy_2[j, i, l, k] = coefficient
-                    energy_2[l, k, j, i] = coefficient
-                    energy_2[k, l, j, i] = coefficient
-                    energy_2[l, k, i, j] = coefficient
-                    energy_2[k, l, i, j] = coefficient
-                case _:
-                    pass
+    from ..models.fcidump import _load_integrals
 
-    energy_2 = energy_2.permute(0, 2, 3, 1).contiguous() / 2
-    return (n_orbit, n_electron, n_spin), energy_0, energy_1, energy_2
+    metadata, integrals = _load_integrals(file_name)
+    assert integrals is not None
+    core, h1, packed_eri = integrals
+    # Rotations act on all four MO indices. FCIDUMP stores (ij|kl); the
+    # rotation code uses 1/2 (ij|kl) with axes in operator order (i,k,l,j).
+    eri = torch.from_numpy(ao2mo.restore(1, packed_eri, metadata[0]))
+    h2 = eri.permute(0, 2, 3, 1).contiguous().mul_(0.5)
+    return metadata, core, torch.from_numpy(h1), h2
 
 
 class NaturalOrbitCalculator:
@@ -241,40 +194,27 @@ class NaturalOrbitCalculator:
         self.n_orbit = n_orbit
 
     def calculate_rdm(self, configs: torch.Tensor, psi: torch.Tensor) -> torch.Tensor:
+        """Compute the normalized spin-averaged density D[p,q] = <a_q† a_p>.
+
+        The eigenvectors are orbital coefficients in the original spatial basis.
+        A fully occupied spatial orbital has spin-averaged occupation one.
         """
-        Calculate the spatial 1-RDM (One-Particle Reduced Density Matrix) for restricted calculations.
-
-        For restricted (closed-shell) systems, we compute the spatial orbital RDM by summing
-        contributions from both alpha and beta spin-orbitals, ensuring spin symmetry is preserved.
-
-        Returns a RDM of shape (n_orbit, n_orbit) for spatial orbitals only.
-        """
-        n_qubits = self.n_orbit * 2
-        # Calculate full spin-orbital RDM first
-        rdm_so = torch.zeros((n_qubits, n_qubits), dtype=torch.complex128, device=psi.device)
-        logging.info("Calculating spin-orbital 1-RDM for %d spin-orbitals", n_qubits)
-
-        for q in range(n_qubits):
-            if q % 10 == 0:
-                logging.info("Processing column %d/%d", q, n_qubits)
-            for p in range(n_qubits):
-                op = Hamiltonian({((p, 1), (q, 0)): 1.0}, kind="fermi")
-                val = psi.conj() @ op.apply_within(configs, psi, configs)
-                rdm_so[p, q] = val
-
-        # Convert to spatial RDM: D_spatial = D_aa + D_bb (for restricted closed-shell)
-        # Alpha spin-orbitals are at even indices (0, 2, 4, ...), beta at odd indices (1, 3, 5, ...)
-        # For restricted case, we take the average: D_spatial = (D_aa + D_bb) / 2
-        # Then the spatial RDM for the transformation should preserve spin symmetry
-        rdm_aa = rdm_so[0::2, 0::2]  # alpha-alpha block
-        rdm_bb = rdm_so[1::2, 1::2]  # beta-beta block
-
-        # For spin-restricted case, average the two blocks
-        # This ensures the resulting natural orbitals are spin-symmetric
-        rdm_spatial = (rdm_aa + rdm_bb) / 2.0
-
-        logging.info("Spatial 1-RDM calculated from spin-orbital RDM (spin-restricted)")
-        return rdm_spatial
+        psi = psi.to(dtype=torch.complex128)
+        norm = torch.vdot(psi, psi).real
+        if not torch.isfinite(norm) or norm <= 0:
+            raise ValueError("Natural orbitals require a finite, positive CI norm.")
+        density = psi.new_empty((self.n_orbit, self.n_orbit))
+        # Only equal-spin operators contribute. Hermiticity supplies the other triangle.
+        for p in range(self.n_orbit):
+            for q in range(p + 1):
+                operators: dict[tuple[tuple[int, int], ...], complex] = {
+                    ((2 * q + spin, 1), (2 * p + spin, 0)): 1.0 + 0j for spin in (0, 1)
+                }
+                summed = Hamiltonian(operators, kind="fermi").apply_within(configs, psi, configs)
+                value = torch.vdot(psi, summed) / (2 * norm)
+                density[p, q] = value
+                density[q, p] = value.conj()
+        return density
 
 
 action_dict["orbit"] = OrbitConfig

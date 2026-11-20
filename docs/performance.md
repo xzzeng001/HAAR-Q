@@ -1,5 +1,43 @@
 # Performance and memory
 
+## Measured workflows in 0.7.1
+
+These comparisons used one CPU thread under Ubuntu/WSL on an Intel Core
+i7-13700KF. Each number is a warmed median. The input size and the unit of
+work differ by row.
+
+| Operation | Input | 0.7.0 | 0.7.1 | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| Construct a molecular Hamiltonian from PySCF integrals | 10 spatial orbitals, 14,251 terms | 195.52 ms | 11.47 ms | 17.05× |
+| Construct the spatial one-body density | 6 spatial orbitals, 36 determinants | 4.211 ms | 0.848 ms | 4.96× |
+| Run a Guide cycle | 10 Ising spins, 128 seeds, target size 256 | 78.53 ms | 51.82 ms | 1.52× |
+
+For molecular preparation, run the following with each checkout on
+`PYTHONPATH`. The script reports the source path, median of three measured
+runs and a digest over all canonical terms. Both versions produced the same
+digest. The timing begins with spatial integrals in memory and ends with the
+constructed Hamiltonian. Direct packing removes the old dense spin-orbital
+tensor and intermediate operator dictionary.
+
+```bash
+PYTHONPATH=. python /path/to/0.7.1/benchmarks/molecular_integrals.py --norb 10 --repeats 3 --threads 1
+```
+
+The density comparison used one alpha and one beta electron, a normalized
+real CI vector and seven alternating pairs. Spin summation and Hermitian
+symmetry reduced Hamiltonian applications from 144 to 21. The returned
+one-body density is spin averaged, with trace equal to half the electron count.
+
+The Guide comparison used two wavefunction Adam updates, each followed by
+eight sampler updates. Both loops used the same float64 MLP of hidden width
+32, seed 1731, sampler implementation and Hamiltonian. Five alternating
+pairs included sampling, expansion and optimization, with checkpoint and
+log-file I/O excluded. Reusing the fixed residual reduced Hamiltonian
+applications from 20 to 6. The maximum final parameter difference was
+4.69e-14. All three timings describe the specified CPU operations.
+
+## Changes introduced in 0.7.0
+
 HAAR-Q 0.7.0 optimizes fermionic sign evaluation, FCIDUMP loading and the
 saved activations used by projected VMC. Scientific calculations still use
 the configured network precision and complex128 Hamiltonian amplitudes.

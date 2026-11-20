@@ -132,29 +132,25 @@ class _DynamicLanczos:
         yield (alpha, beta, v)
         w = w - alpha[-1] * v[-1]
         while len(v) < len(self.configs):
+            if self.period > 0 and len(v) % self.period == 0:
+                # Refresh orthogonality without changing the Krylov direction: beta
+                # couples v[-1] to this residual in the projected tridiagonal.
+                for previous in v:
+                    vector = previous.to(device=w.device)
+                    w = w - torch.vdot(vector, w) * vector
             norm_w = torch.linalg.norm(w)
-            beta.append(norm_w)
-            if norm_w < self.threshold or (len(v) % self.period == 0):
-                # Generate a random vector to continue the Lanczos process
-                random_v = torch.randn_like(v[-1])
-                if norm_w < self.threshold:
-                    beta[-1] = torch.zeros_like(norm_w)
-                else:
-                    # Preserve the support of the current Krylov basis for scheduled restarts.
-                    support = torch.zeros_like(random_v, dtype=torch.bool)
-                    for prev_v in v:
-                        support |= prev_v.to(device=random_v.device).abs() > self.threshold
-                    random_v = torch.where(support, random_v, 0)
-                # Orthogonalize the random vector against all previous vectors
-                for prev_v in v:
-                    prev_v_device = prev_v.to(device=random_v.device)
-                    dot = prev_v_device.conj() @ random_v
-                    random_v = random_v - dot * prev_v_device
-                # Normalize the random vector
-                random_v = random_v / torch.linalg.norm(random_v)
-                v.append(random_v)
+            if norm_w <= self.threshold:
+                # At a breakdown, the projected blocks decouple. An independent
+                # start exposes other invariant subspaces (and degenerate roots).
+                beta.append(torch.zeros_like(norm_w))
+                new_vector = torch.randn_like(v[-1])
+                for previous in v:
+                    vector = previous.to(device=w.device)
+                    new_vector = new_vector - torch.vdot(vector, new_vector) * vector
+                v.append(new_vector / torch.linalg.norm(new_vector))
             else:
-                v.append(w / beta[-1])
+                beta.append(norm_w)
+                v.append(w / norm_w)
 
             w = self._apply_within(self.configs, v[-1], self.configs)
             alpha.append((w.conj() @ v[-1]).real)
@@ -170,27 +166,16 @@ class _DynamicLanczos:
             v[-2] = v[-2].cpu()  # v maybe very large, so we need to move it to CPU
 
     def _apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
-        batch_size = len(configs_i)
-        local_batch_size = batch_size // self.batch_count_apply_within
-        remainder = batch_size % self.batch_count_apply_within
-        result: torch.Tensor | None = None
-        for i in range(self.batch_count_apply_within):
-            if i < remainder:
-                current_local_batch_size = local_batch_size + 1
-            else:
-                current_local_batch_size = local_batch_size
-            start_index = i * local_batch_size + min(i, remainder)
-            end_index = start_index + current_local_batch_size
-            local_result = self.model.apply_within(
-                configs_i[start_index:end_index],
-                psi_i[start_index:end_index],
-                configs_j,
-            )
-            if result is None:
-                result = local_result
-            else:
-                result = result + local_result
-        assert result is not None
+        if self.batch_count_apply_within < 1:
+            raise ValueError("The SCI Hamiltonian batch count must be positive.")
+        batches = min(self.batch_count_apply_within, len(configs_i))
+        if batches <= 1:
+            return self.model.apply_within(configs_i, psi_i, configs_j)
+        pieces = zip(torch.tensor_split(configs_i, batches), torch.tensor_split(psi_i, batches), strict=True)
+        src, psi = next(pieces)
+        result = self.model.apply_within(src, psi, configs_j)
+        for src, psi in pieces:
+            result = result + self.model.apply_within(src, psi, configs_j)
         return result
 
     def _eigh_tridiagonal(
@@ -220,6 +205,41 @@ class _DynamicLanczos:
             )
             results.append((energy, psi))
         return results
+
+
+def _fit_amplitudes(
+    network: typing.Callable[[torch.Tensor], torch.Tensor],
+    configs: torch.Tensor,
+    target: torch.Tensor,
+    reference_config: torch.Tensor,
+    batches: int,
+    loss_func: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    *,
+    backward: bool,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Fit amplitudes relative to one common reference, weighting each determinant equally.
+
+    Training accumulates chunk gradients before the optimizer update. Reporting
+    collects the updated amplitudes in basis order without creating a backward graph.
+    """
+    if batches < 1 or not len(configs):
+        raise ValueError("SCI fitting requires a positive batch count and a nonempty selected basis.")
+    n_chunks = min(batches, len(configs))
+    total_loss = target.real.new_zeros(())
+    reported = []
+    with torch.set_grad_enabled(backward):
+        for chunk, expected in zip(
+            torch.tensor_split(configs, n_chunks), torch.tensor_split(target, n_chunks), strict=True
+        ):
+            values = network(torch.cat((chunk, reference_config)))
+            relative = values[:-1] / values[-1]
+            loss = loss_func(relative, expected) * (len(chunk) / len(configs))
+            if backward:
+                loss.backward()  # type: ignore[no-untyped-call]
+            else:
+                reported.append(relative)
+            total_loss += loss.detach()
+    return total_loss, reported
 
 
 def _sampling_from_last_iteration(
@@ -280,12 +300,13 @@ def _merge_pool_from_neural_network_and_pool_from_last_iteration(
     assert configs_b is not None
     assert psi_b is not None
     configs_both = torch.cat([configs_a, configs_b])
-    psi_both = torch.cat([psi_a, psi_b])
     configs_result, indices = torch.unique(configs_both, return_inverse=True, dim=0)
-    # If the configurations are not unique, we prefer the psi from the last iteration.
-    psi_result = torch.zeros(len(configs_result), device=psi_both.device, dtype=psi_both.dtype).scatter_(
-        0, indices, psi_both
-    )
+    # Both input pools are individually unique. Write them separately so a
+    # determinant present in both always takes its saved amplitude, also on CUDA.
+    dtype = torch.promote_types(psi_a.dtype, psi_b.dtype)
+    psi_result = torch.empty(len(configs_result), device=psi_a.device, dtype=dtype)
+    psi_result[indices[: len(configs_a)]] = psi_a.to(dtype)
+    psi_result[indices[len(configs_a) :]] = psi_b.to(dtype)
     return configs_result, psi_result
 
 
@@ -330,12 +351,6 @@ class HaarConfig:
 
     def __post_init__(self) -> None:
         if self.local_step == -1:
-            # Default value logic was: 1000 if self.use_lbfgs else 10000
-            # Since we removed use_lbfgs from config, we can't infer this easily.
-            # We must choose a default or expect user to set it.
-            # I will set a safe default like 1000, or stick to 10000.
-            # But wait, LBFGS usually needs fewer steps.
-            # If the user sets optimization in config, maybe we can assume 10000 for Adam.
             self.local_step = 10000
         if self.krylov_extend_count == -1:
             self.krylov_extend_count = 2048 if self.krylov_single_extend else 64
@@ -454,7 +469,7 @@ class HaarConfig:
                 single_extend=self.krylov_single_extend,
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
-                period=max(self.krylov_iteration + 1, self.krylov_period) if excited else self.krylov_period,
+                period=self.krylov_period,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info(
@@ -492,38 +507,20 @@ class HaarConfig:
 
             loss_func: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = getattr(losses, self.loss_name)
 
+            reference_config = configs[max_index.reshape(1)]
+
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                total_size = len(configs)
-                batch_size = total_size // self.local_batch_count_loss_function
-                remainder = total_size % self.local_batch_count_loss_function
-                total_loss = 0.0
-                total_psi = []
-                for i in range(self.local_batch_count_loss_function):
-                    if i < remainder:
-                        current_batch_size = batch_size + 1
-                    else:
-                        current_batch_size = batch_size
-                    start_index = i * batch_size + min(i, remainder)
-                    end_index = start_index + current_batch_size
-                    batch_indices = torch.arange(start_index, end_index, device=configs.device, dtype=torch.int64)
-                    psi_batch = target_psi[batch_indices]
-                    batch_indices = torch.cat(
-                        (batch_indices, torch.tensor([max_index], device=configs.device, dtype=torch.int64))
-                    )
-                    batch_configs = configs[batch_indices]
-                    psi = network(batch_configs)
-                    psi_max = psi[-1]
-                    psi = psi[:-1]
-                    psi = psi / psi_max
-                    loss = loss_func(psi, psi_batch)
-                    loss = loss * (current_batch_size / total_size)
-                    loss.backward()  # type: ignore[no-untyped-call]
-                    total_loss += loss.item()
-                    total_psi.append(psi.detach())
-                total_loss_tensor = torch.tensor(total_loss)
-                total_loss_tensor.psi = torch.cat(total_psi)  # type: ignore[attr-defined]
-                return total_loss_tensor
+                loss, _ = _fit_amplitudes(
+                    network,
+                    configs,
+                    target_psi,
+                    reference_config,
+                    self.local_batch_count_loss_function,
+                    loss_func,
+                    backward=True,
+                )
+                return loss
 
             loss: torch.Tensor
             try_index = 0
@@ -569,8 +566,16 @@ class HaarConfig:
 
             logging.info("Current optimization cycle completed")
 
-            loss = typing.cast(torch.Tensor, torch.enable_grad(closure)())  # type: ignore[no-untyped-call,call-arg]
-            psi: torch.Tensor = loss.psi  # type: ignore[attr-defined]
+            loss, amplitudes = _fit_amplitudes(
+                network,
+                configs,
+                target_psi,
+                reference_config,
+                self.local_batch_count_loss_function,
+                loss_func,
+                backward=False,
+            )
+            psi = torch.cat(amplitudes)
             final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs)) / (psi.conj() @ psi)).real
             logging.info(
                 "Loss during local optimization: %.10f, Final energy: %.10f, Target energy: %.10f, Reference energy: %.10f, Final error: %.10f",

@@ -11,10 +11,18 @@ If you have any questions, please use the GitHub discussions.
 
 ## Code structure
 
-HAAR-Q follows the standard Python package structure.
-We organize the package code into the folder named `haar_q`.
-The file `pyproject.toml` is used to define the package metadata.
-There are also some other files such as `.clang-format`, `.pre-commit-config.yaml` used to format and lint the code.
+Start at [the CLI](haar_q/__main__.py). It composes the selected groups in
+`haar_q/conf`, resolves paths against the input YAML and validates the active
+method. [RuntimeContext](haar_q/utility/context.py) restores the checkpoint,
+builds the model, network and optimizer, and saves each completed cycle.
+
+| Area | Execution path and responsibilities |
+| --- | --- |
+| Molecular models | `models/geometry.py` obtains integrals from PySCF. `models/pyscf.py` and `models/fcidump.py` delegate spin-orbital packing to `models/_integrals.py`. |
+| Hamiltonian | `hamiltonian/hamiltonian.py` dispatches projection, expansion and diagonals to the native CPU/CUDA implementations. `utility/parallel_hamiltonian.py` distributes source determinants across GPUs. |
+| Sampling and VMC | `networks/mlp.py` and `networks/transformers.py` call the same unique path selector. `algorithms/vmc.py` differentiates a projected Rayleigh quotient. `algorithms/guide.py` also fits a separate sampler. |
+| SCI | `algorithms/haar.py` selects a basis, constructs Ritz targets and fits the network. `algorithms/selected_states.py` solves for multiple roots. Orbital SCI reuses the Lanczos and fitting routines. |
+| Physical observables | `utility/sci_checkpoint.py` reads the signed state for post-processing. The PySCF adapter and analytic forces account for fermionic phase changes on conversion to separate alpha/beta strings. |
 
 Use **HAAR-Q** in prose, `haar-q` for the distribution and command-line entry
 point, and `haar_q` in Python imports. HAAR-SCI is the published algorithm's
@@ -41,21 +49,26 @@ Install development dependencies from your local checkout:
 python -m pip install -e ".[dev]"
 ```
 
-Run the Python tests that do not require native Hamiltonian compilation:
+Run the CPU suite in the checkout with the development dependencies, a C++20
+compiler and Ninja. GitHub Actions uses the same command. GPU cases run
+when the required CUDA devices are visible.
 
 ```bash
-python -m pytest tests/bitspack_test.py tests/vmc_test.py
+python -m pytest -q
 ```
 
-The Hamiltonian tests require a working native build toolchain:
+For a targeted run, choose the suite covering the physical quantity you changed.
 
 ```bash
-python -m pytest tests/hamiltonian_test.py
+python -m pytest -q tests/vmc_batch_test.py tests/unique_sampling_test.py
+python -m pytest -q tests/integral_conversion_test.py tests/pyscf_solver_test.py
+python -m pytest -q tests/sci_workflow_test.py tests/selected_force_reference_test.py
 ```
 
 For algorithm changes, verify energies and gradients against a small,
 independently evaluated reference. Describe the tested device, input, and
-configuration; distinguish these checks from larger-system benchmarks.
+configuration. Record the timed operation, thread count and repeat count
+alongside performance results. See [the benchmark notes](docs/performance.md).
 
 ## Release Packaging
 

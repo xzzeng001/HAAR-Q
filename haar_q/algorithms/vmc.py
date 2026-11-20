@@ -14,6 +14,20 @@ from ..utility.model_dict import ModelProto, NetworkProto
 from ..utility.reporting import CycleResult
 
 
+def expand_seeds(model: ModelProto, seeds: torch.Tensor, psi: torch.Tensor, target: int) -> torch.Tensor:
+    """Append Hamiltonian-connected states, preserving the seed rows as a prefix."""
+    remaining = target - len(seeds)
+    if remaining <= 0:
+        return seeds
+    return torch.cat((seeds, model.find_relative(seeds, psi, remaining, configs_exclude=seeds)))
+
+
+def sampled_energy(psi: torch.Tensor, hpsi: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """Weighted sampled estimator with only the bra differentiated by VMC and guide."""
+    bra = psi.conj() * weights
+    return (bra @ hpsi) / (bra @ psi.detach())
+
+
 def _projected_energy_residual(psi: torch.Tensor, hpsi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Use one global norm for the entire selected configuration space."""
     with torch.no_grad():
@@ -154,17 +168,7 @@ class VmcConfig:
             logging.info("Sampling completed, unique configurations count: %d", len(configs_i))
 
             logging.info("Calculating relative configurations")
-            if self.relative_count <= len(configs_i):
-                configs_dst = configs_i
-            else:
-                configs_dst = torch.cat(
-                    [
-                        configs_i,
-                        model.find_relative(
-                            configs_i, psi_i, self.relative_count - len(configs_i), configs_exclude=configs_i
-                        ),
-                    ]
-                )
+            configs_dst = expand_seeds(model, configs_i, psi_i, self.relative_count)
             if self.hamiltonian_guided:
                 # Each selected configuration is one basis state, regardless of
                 # sampling multiplicity. New neighbors participate in gradients.
@@ -194,11 +198,7 @@ class VmcConfig:
                 with torch.no_grad():
                     psi_dst = network(configs_dst)
                     hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                psi_src_reweight = psi_src.conj() * reweight
-                num = psi_src_reweight @ hamiltonian_psi_dst
-                den = psi_src_reweight @ psi_src.detach()
-                energy = num / den
-                energy = energy.real
+                energy = sampled_energy(psi_src, hamiltonian_psi_dst, reweight).real
                 energy.backward()  # type: ignore[no-untyped-call]
                 return energy
 

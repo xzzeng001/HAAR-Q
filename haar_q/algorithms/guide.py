@@ -10,6 +10,7 @@ import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+from .vmc import expand_seeds, sampled_energy
 
 
 @dataclasses.dataclass
@@ -89,86 +90,31 @@ class GuideConfig:
                 reweight_sampling = count_sampling / psi_src_sampling.abs() ** 2
 
             logging.info("Calculating relative configurations")
-            if self.relative_count <= len(configs_src_network):
-                configs_dst_network = configs_src_network
-            else:
-                configs_dst_network = torch.cat(
-                    [
-                        configs_src_network,
-                        model.find_relative(
-                            configs_src_network, psi_src_network, self.relative_count - len(configs_src_network)
-                        ),
-                    ]
-                )
-            if self.relative_count <= len(configs_src_sampling):
-                configs_dst_sampling = configs_src_sampling
-            else:
-                configs_dst_sampling = torch.cat(
-                    [
-                        configs_src_sampling,
-                        model.find_relative(
-                            configs_src_sampling, psi_src_sampling, self.relative_count - len(configs_src_sampling)
-                        ),
-                    ]
-                )
+            configs_dst_network = expand_seeds(model, configs_src_network, psi_src_network, self.relative_count)
+            configs_dst_sampling = expand_seeds(model, configs_src_sampling, psi_src_sampling, self.relative_count)
 
             def energy_sampling() -> torch.Tensor:
                 optimizer_network.zero_grad()
-                configs_src = configs_src_sampling
-                configs_dst = configs_dst_sampling
-                psi_src = network(configs_src)
+                psi_src = network(configs_src_sampling)
                 with torch.no_grad():
-                    psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                psi_src_reweight = psi_src.conj() * reweight_sampling
-                num = psi_src_reweight @ hamiltonian_psi_dst
-                den = psi_src_reweight @ psi_src.detach()
-                energy = num / den
-                energy.real.backward()  # type: ignore[no-untyped-call]
-                return energy.real
+                    psi_dst = network(configs_dst_sampling)
+                    hpsi = model.apply_within(configs_dst_sampling, psi_dst, configs_src_sampling)
+                energy = sampled_energy(psi_src, hpsi, reweight_sampling).real
+                energy.backward()  # type: ignore[no-untyped-call]
+                return energy
 
-            def energy_network() -> torch.Tensor:
-                with torch.no_grad():
-                    configs_src = configs_src_network
-                    configs_dst = configs_dst_network
-                    psi_src = network(configs_src)
-                    psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                    psi_src_reweight = psi_src.conj() * reweight_network
-                    num = psi_src_reweight @ hamiltonian_psi_dst
-                    den = psi_src_reweight @ psi_src.detach()
-                    energy = num / den
-                    return energy.real
-
-            def distribution() -> torch.Tensor:
-                optimizer_sampling.zero_grad()
-                configs_src = configs_src_sampling
-                configs_dst = configs_dst_sampling
-                with torch.no_grad():
-                    psi_src = network(configs_src)
-                    psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                    psi_src_reweight = psi_src.conj() * reweight_sampling
-                    num = psi_src_reweight @ hamiltonian_psi_dst
-                    den = psi_src_reweight @ psi_src
-                    energy = num / den
-                    local_energy = hamiltonian_psi_dst / psi_src
-                    energy_diff = local_energy - energy
-                    weight = (energy_diff.real**2 + energy_diff.imag**2) * (psi_src.real**2 + psi_src.imag**2)
-                    weight = weight / weight.sum()
-                pred_amplitude = sampling(configs_src)
-                pred_weight = pred_amplitude.real**2 + pred_amplitude.imag**2
-                pred_weight = pred_weight / pred_weight.sum()
-                loss = pred_weight - weight
-                total_loss = (loss**2).sum()
-                total_loss.backward()  # type: ignore[no-untyped-call]
-                return total_loss
+            @torch.no_grad()
+            def evaluate(seeds: torch.Tensor, support: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+                # expand_seeds retains the seed rows at the start of the support.
+                psi = network(support)
+                return psi[: len(seeds)], model.apply_within(support, psi, seeds)
 
             logging.info("Starting local optimization process")
 
             for i in range(self.local_step):
                 sampling_energy: torch.Tensor = optimizer_network.step(energy_sampling)  # type: ignore[assignment,arg-type]
-                network_energy: torch.Tensor = energy_network()
+                diagnostic_psi, diagnostic_hpsi = evaluate(configs_src_network, configs_dst_network)
+                network_energy = sampled_energy(diagnostic_psi, diagnostic_hpsi, reweight_network).real
                 logging.info(
                     "Local optimization in progress, step: %d, energy from sampling: %.10f, energy from network: %.10f, ref energy: %.10f",
                     i,
@@ -180,10 +126,31 @@ class GuideConfig:
                 writer.add_scalar("guide/error/sampling", sampling_energy - model.ref_energy, data["guide"]["local"])  # type: ignore[no-untyped-call]
                 writer.add_scalar("guide/energy/network", network_energy, data["guide"]["local"])  # type: ignore[no-untyped-call]
                 writer.add_scalar("guide/error/network", network_energy - model.ref_energy, data["guide"]["local"])  # type: ignore[no-untyped-call]
-                for _ in range(self.dist_step):
-                    dist_loss: torch.Tensor = optimizer_sampling.step(distribution)  # type: ignore[assignment,arg-type]
-                    writer.add_scalar("guide/dist/loss", dist_loss, data["guide"]["dist"])  # type: ignore[no-untyped-call]
-                    data["guide"]["dist"] += 1
+                if self.dist_step > 0:
+                    # The main network stays fixed throughout these sampler-only updates,
+                    # including repeated LBFGS closure evaluations.
+                    psi, hpsi = evaluate(configs_src_sampling, configs_dst_sampling)
+                    energy = sampled_energy(psi, hpsi, reweight_sampling)
+                    residual_weight = (hpsi - energy * psi).abs().square()
+                    total_weight = residual_weight.sum()
+                    if not torch.isfinite(total_weight):
+                        raise ValueError("The guide sampler target must have a finite residual norm.")
+                    if total_weight > 0:
+                        target = residual_weight / total_weight
+
+                        def distribution() -> torch.Tensor:
+                            optimizer_sampling.zero_grad()
+                            probability = sampling(configs_src_sampling).abs().square()
+                            loss = (probability / probability.sum() - target).square().sum()
+                            loss.backward()  # type: ignore[no-untyped-call]
+                            return loss
+
+                        for _ in range(self.dist_step):
+                            dist_loss: torch.Tensor = optimizer_sampling.step(distribution)  # type: ignore[assignment,arg-type]
+                            writer.add_scalar("guide/dist/loss", dist_loss, data["guide"]["dist"])  # type: ignore[no-untyped-call]
+                            data["guide"]["dist"] += 1
+                    else:
+                        logging.info("Skipping guide sampler updates: the selected residual is zero.")
                 data["guide"]["local"] += 1
 
             logging.info("Local optimization process completed")

@@ -46,10 +46,16 @@ auto prepare(py::dict hamiltonian) {
         auto value = value_is_float ? std::complex<double>(item.second.cast<double>()) : item.second.cast<std::complex<double>>();
 
         std::int64_t op_number = key.size();
+        TORCH_CHECK(op_number <= max_op_number, "Hamiltonian terms may contain at most ", max_op_number, " operators.");
         for (std::int64_t i = 0; i < op_number; ++i) {
             auto tuple = key[i].cast<py::tuple>();
-            site_accessor[index][i] = tuple[0].cast<std::int16_t>();
-            kind_accessor[index][i] = tuple[1].cast<std::uint8_t>();
+            TORCH_CHECK(tuple.size() == 2, "Expected a (site, kind) operator.");
+            auto site_index = tuple[0].cast<std::int16_t>();
+            auto op_kind = tuple[1].cast<std::uint8_t>();
+            TORCH_CHECK(site_index >= 0, "Operator sites must be nonnegative.");
+            TORCH_CHECK(op_kind <= 2, "Expected annihilation (0), creation (1), or identity (2).");
+            site_accessor[index][i] = site_index;
+            kind_accessor[index][i] = op_kind;
         }
 
         coef_accessor[index][0] = value.real();

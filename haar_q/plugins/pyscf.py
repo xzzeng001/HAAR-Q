@@ -16,7 +16,7 @@ The ``config`` argument mirrors the YAML config accepted by ``haar_q.__main__``:
         "common": {
             "device": "cpu",
             "dtype": "float64",
-            "max_absolute_step": 10,
+            "max_relative_step": 10,
         },
     }
 
@@ -31,12 +31,12 @@ Internally the solver closely mimics :func:`haar_q.__main__.main`:
    ``save()`` — are inherited unchanged from :class:`RuntimeContext` and work
    via normal polymorphism.
 4. Runs the algorithm via its ``main()`` method.
-5. When ``max_absolute_step`` is reached, the base ``save()`` writes the
+5. When the requested cycle limit is reached, the base ``save()`` writes the
    checkpoint to the temporary directory and calls ``sys.exit(0)``.  The
    solver catches the resulting :class:`SystemExit` and reads the saved
    checkpoint file to extract the energy and CI data.
 
-The returned ``ci`` dict may be passed back as ``ci0`` to warm-start
+The returned CI array or checkpoint may be passed back as ``ci0`` to warm-start
 subsequent calls.
 """
 
@@ -54,6 +54,8 @@ from ..models.pyscf import Model, ModelConfig
 from ..utility.action_dict import create_action
 from ..utility.context import DACITE_CAST, RuntimeContext
 from ..utility.model_dict import ModelProto
+from ..utility.sci_checkpoint import checkpoint_state, latest_ritz
+from ..utility.spin_order import spin_order_sign
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +119,12 @@ class _PyscfRuntimeContext(RuntimeContext):
         return self._model_instance
 
 
+def _spin_counts(nelec: int | tuple[int, int]) -> tuple[int, int]:
+    if isinstance(nelec, (int, numpy.integer)):
+        return (int(nelec) + 1) // 2, int(nelec) // 2
+    return int(nelec[0]), int(nelec[1])
+
+
 def _to_pyscf_ci(
     data: dict[str, typing.Any], action_name: str, norb: int, nelec: int | tuple[int, int]
 ) -> numpy.ndarray | None:
@@ -134,25 +142,15 @@ def _to_pyscf_ci(
     haar_data = data.get("haar")
     if not haar_data:
         return None
-    pool = haar_data.get("pool")
-    if not pool:
-        return None
+    configs, psi = checkpoint_state(haar_data)
 
-    configs, psi = pool
-    if configs is None or psi is None:
-        return None
-
-    if isinstance(nelec, (int, numpy.integer)):
-        nalpha = (int(nelec) + 1) // 2
-        nbeta = int(nelec) - nalpha
-    else:
-        nalpha, nbeta = int(nelec[0]), int(nelec[1])
+    nalpha, nbeta = _spin_counts(nelec)
 
     na = cistring.num_strings(norb, nalpha)
     nb = cistring.num_strings(norb, nbeta)
 
     # Limit CI vector size to avoid memory overflow (approx 10^8 elements ~ 1.6GB)
-    if na * nb > 10**8:
+    if norb >= 64 or na * nb > 10**8:
         return None
 
     configs_np = configs.cpu().numpy()
@@ -170,17 +168,14 @@ def _to_pyscf_ci(
     alpha_dets = (alpha_bits.astype(numpy.uint64) * pw2).sum(axis=1)
     beta_dets = (beta_bits.astype(numpy.uint64) * pw2).sum(axis=1)
 
-    # Map bitmasks to PySCF determinant indices
-    try:
-        addr_a = cistring.str2addr(norb, nalpha, alpha_dets)
-        addr_b = cistring.str2addr(norb, nbeta, beta_dets)
-    except Exception:
-        # Fallback for older PySCF or if vectorized call fails
-        addr_a = numpy.array([cistring.str2addr(norb, nalpha, int(d)) for d in alpha_dets])
-        addr_b = numpy.array([cistring.str2addr(norb, nbeta, int(d)) for d in beta_dets])
+    # Only the requested spin sector fits in the PySCF alpha/beta CI array.
+    if numpy.any(alpha_bits.sum(axis=1) != nalpha) or numpy.any(beta_bits.sum(axis=1) != nbeta):
+        raise ValueError("Cannot export a CI array outside the requested alpha/beta spin sector.")
+    addr_a = cistring.strs2addr(norb, nalpha, alpha_dets)
+    addr_b = cistring.strs2addr(norb, nbeta, beta_dets)
 
     ci_array = numpy.zeros((na, nb), dtype=psi_np.dtype)
-    ci_array[addr_a, addr_b] = psi_np
+    ci_array[addr_a, addr_b] = psi_np * spin_order_sign(alpha_bits, beta_bits)
 
     return ci_array
 
@@ -194,29 +189,29 @@ def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, i
     except ImportError:
         return {}
 
-    if isinstance(nelec, (int, numpy.integer)):
-        nalpha = (int(nelec) + 1) // 2
-        nbeta = int(nelec) - nalpha
-    else:
-        nalpha, nbeta = int(nelec[0]), int(nelec[1])
-
-    idx_a, idx_b = numpy.where(ci_array != 0)
-    amplitudes = ci_array[idx_a, idx_b]
+    nalpha, nbeta = _spin_counts(nelec)
+    if norb >= 64:
+        raise ValueError("PySCF CI arrays require fewer than 64 spatial orbitals. Use a checkpoint for larger spaces.")
+    shape = (cistring.num_strings(norb, nalpha), cistring.num_strings(norb, nbeta))
+    if ci_array.shape != shape:
+        raise ValueError(f"Expected a CI array of shape {shape}, got {ci_array.shape}.")
+    idx_a, idx_b = numpy.nonzero(ci_array)
 
     str_a = cistring.addrs2str(norb, nalpha, idx_a)
     str_b = cistring.addrs2str(norb, nbeta, idx_b)
 
-    n_qubytes = (2 * norb + 7) // 8
-    N = len(str_a)
-    configs = numpy.zeros((N, n_qubytes), dtype=numpy.uint8)
-
+    # Pack one orbital at a time so conversion only needs O(nonzero CI entries)
+    # scratch space in addition to the packed output.
+    configs = numpy.zeros((len(idx_a), (2 * norb + 7) // 8), dtype=numpy.uint8)
+    lower_beta_parity = numpy.zeros(len(idx_a), dtype=numpy.uint8)
+    odd = numpy.zeros_like(lower_beta_parity)
     for j in range(norb):
-        a_bit = (str_a >> j) & 1
-        b_bit = (str_b >> j) & 1
-        pos_a = 2 * j
-        pos_b = 2 * j + 1
-        configs[:, pos_a // 8] |= (a_bit << (pos_a % 8)).astype(numpy.uint8)
-        configs[:, pos_b // 8] |= (b_bit << (pos_b % 8)).astype(numpy.uint8)
+        a = ((str_a >> j) & 1).astype(numpy.uint8)
+        b = ((str_b >> j) & 1).astype(numpy.uint8)
+        odd ^= a & lower_beta_parity
+        lower_beta_parity ^= b
+        configs[:, j // 4] |= (a | (b << 1)) << (2 * (j % 4))
+    amplitudes = (ci_array[idx_a, idx_b] * (1 - 2 * odd.astype(numpy.int8))).astype(numpy.complex128)
 
     return {
         "haar": {
@@ -245,7 +240,7 @@ class Solver:
             "action": {"name": "haar", "params": {}},
             "network": {"name": "mlp/u1u1", "params": {}},
             "optimizer": {"name": "Adam", "params": {"lr": 1e-3}},
-            "common": {"device": "cpu", "max_absolute_step": 10},
+            "common": {"device": "cpu", "max_relative_step": 10},
         })
         energy, ci = solver.kernel(h1e, eri, norb, nelec)
 
@@ -256,8 +251,8 @@ class Solver:
         Required top-level keys: ``action``, ``network``, ``optimizer``,
         ``common``.  The ``model`` key is ignored (the model is built
         automatically from the integral arrays passed to :meth:`kernel`).
-        ``common.max_absolute_step`` controls how many global algorithm steps
-        to run before returning.
+        ``common.max_relative_step`` controls how many new cycles to run on
+        each call, including calls that resume an earlier CI checkpoint.
     """
 
     def __init__(self, config: dict[str, typing.Any] | omegaconf.DictConfig) -> None:
@@ -273,7 +268,7 @@ class Solver:
         norb: int,
         nelec: int | tuple[int, int],
         ci0: dict[str, typing.Any] | numpy.ndarray | None = None,
-        nuclear_repulsion: float = 0.0,
+        nuclear_repulsion: float | None = None,
         ref_energy: float = 0.0,
         **kwargs: typing.Any,
     ) -> tuple[float, numpy.ndarray | dict[str, typing.Any]]:
@@ -308,7 +303,8 @@ class Solver:
         ref_energy : float
             Reference energy used for logging only.
         **kwargs
-            Ignored; present for drop-in compatibility with PySCF solvers.
+            PySCF's ``ecore`` keyword supplies the same constant offset as
+            ``nuclear_repulsion``. Supplying inconsistent values raises an error.
 
         Returns
         -------
@@ -322,11 +318,12 @@ class Solver:
         # ------------------------------------------------------------------
         # 1. Resolve electron counts
         # ------------------------------------------------------------------
-        if isinstance(nelec, (int, numpy.integer)):
-            nalpha = (int(nelec) + 1) // 2
-            nbeta = int(nelec) - nalpha
-        else:
-            nalpha, nbeta = int(nelec[0]), int(nelec[1])
+        nalpha, nbeta = _spin_counts(nelec)
+        ecore = float(kwargs.get("ecore", nuclear_repulsion if nuclear_repulsion is not None else 0.0))
+        if nuclear_repulsion is not None and nuclear_repulsion != ecore:
+            raise ValueError("ecore and nuclear_repulsion specify different constant energies.")
+        if self.config.action.name not in {"haar", "imag"}:
+            raise ValueError("The PySCF ground-state Solver requires action.name=haar (or its legacy alias imag).")
 
         n_electron = nalpha + nbeta
         n_spin = nalpha - nbeta
@@ -346,7 +343,7 @@ class Solver:
                 n_orbit=norb,
                 n_electron=n_electron,
                 n_spin=n_spin,
-                nuclear_repulsion=nuclear_repulsion,
+                nuclear_repulsion=ecore,
                 ref_energy=ref_energy,
             )
         )
@@ -413,6 +410,8 @@ class Solver:
             # 7. Setup context — loads checkpoint / ci0, configures RNG
             # ------------------------------------------------------------------
             checkpoint_data = context.setup()
+            if context.cycle_limit_reached(self.config.action.name, checkpoint_data):
+                raise ValueError("Warm start already reached max_absolute_step. Increase it or set max_relative_step.")
 
             # ------------------------------------------------------------------
             # 8. Run the algorithm.
@@ -426,8 +425,9 @@ class Solver:
                     runtime_config=runtime_config,
                     checkpoint_data=checkpoint_data,
                 )
-            except SystemExit:
-                pass
+            except SystemExit as exc:
+                if exc.code not in (None, 0):
+                    raise
 
             # ------------------------------------------------------------------
             # 9. Read the checkpoint that was saved by save()
@@ -461,58 +461,16 @@ class Solver:
 
 
 def _extract_energy(data: dict[str, typing.Any], action_name: str, model: ModelProto | None = None) -> float:
-    """
-    Extract the final ground-state energy from algorithm checkpoint data.
-
-    Parameters
-    ----------
-    data : dict
-        Checkpoint data loaded from the temporary directory.
-    action_name : str
-        Name of the algorithm that produced the checkpoint.
-    model : ModelProto, optional
-        The model instance for computing energy expectation value if needed.
-
-    Returns
-    -------
-    float
-        Ground-state energy, or ``0.0`` if it cannot be determined from the
-        checkpoint (e.g. the algorithm does not store energy in its checkpoint).
-    """
-    if action_name in ("haar", "imag"):
-        haar_data = data.get("haar")
-        if haar_data is None:
-            return 0.0
-
-        # Try to get the final energy directly if stored
-        if "final_energy" in haar_data:
-            energy_val = haar_data["final_energy"]
-            if hasattr(energy_val, "item"):
-                return float(energy_val.item())
-            return float(energy_val)
-
-        # Try to compute energy from the pool (configs, psi) if model is available
-        pool = haar_data.get("pool")
-        if pool is not None and model is not None:
-            configs, psi = pool
-            if configs is not None and psi is not None:
-                # Compute expectation value <psi|H|psi> / <psi|psi>
-                h_psi = model.apply_within(configs, psi, configs)
-                energy = ((psi.conj() @ h_psi) / (psi.conj() @ psi)).real
-                if hasattr(energy, "item"):
-                    return float(energy.item())
-                return float(energy)
-
-        # Fallback: try to get from excited state results (Lanczos energy)
-        haar_global_step: int = haar_data.get("global", 0)
-        if haar_global_step > 0:
-            last_key = haar_global_step - 1
-            excited: dict[int, list[typing.Any]] = haar_data.get("excited", {})
-            results = excited.get(last_key)
-            if results:
-                # results is list[(energy_tensor, configs, psi)]; index 0 is ground state.
-                energy_val = results[0][0]
-                if hasattr(energy_val, "item"):
-                    return float(energy_val.item())
-
-    return 0.0
+    """Return the ground Ritz energy, using the pool expectation for legacy checkpoints."""
+    haar = data.get("haar", data.get("imag", {}))
+    root = latest_ritz(haar)
+    if root is not None:
+        return float(root[0])
+    if "final_energy" in haar:
+        return float(haar["final_energy"])
+    pool = haar.get("pool")
+    if model is not None and pool is not None:
+        configs, psi = pool
+        hpsi = model.apply_within(configs, psi, configs)
+        return float((torch.vdot(psi, hpsi) / torch.vdot(psi, psi)).real)
+    raise ValueError(f"No ground-state energy or wavefunction in the {action_name} checkpoint.")

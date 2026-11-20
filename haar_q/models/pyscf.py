@@ -10,7 +10,7 @@ import logging
 import dataclasses
 import numpy
 import torch
-import openfermion
+from ._integrals import _packed_terms
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
 from ..networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
 from ..networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunction
@@ -44,52 +44,6 @@ class ModelConfig:
     ref_energy: float = 0.0
 
 
-def _restore_eri(eri: numpy.ndarray, norb: int) -> numpy.ndarray:
-    """
-    Restore a compressed ERI array to the full (norb, norb, norb, norb) form.
-
-    Supports:
-    - 4D array of shape (norb, norb, norb, norb): returned as-is.
-    - 2D array of shape (nij, nij) in 4-fold symmetric format
-      (nij = norb*(norb+1)//2), where the lower-triangle index is
-      ij = i*(i+1)//2 + j for i >= j.
-
-    Parameters
-    ----------
-    eri : numpy.ndarray
-        The electron-repulsion integral array.
-    norb : int
-        Number of spatial orbitals.
-
-    Returns
-    -------
-    numpy.ndarray
-        Full (norb, norb, norb, norb) ERI array.
-    """
-    if eri.ndim == 4:
-        return eri
-    if eri.ndim == 2:
-        nij = norb * (norb + 1) // 2
-        if eri.shape != (nij, nij):
-            raise ValueError(f"For 2D ERI, expected shape ({nij}, {nij}) for norb={norb}, got {eri.shape}")
-        eri_full = numpy.zeros((norb, norb, norb, norb), dtype=eri.dtype)
-        i_idx, j_idx = numpy.tril_indices(norb)
-        ij_list = list(zip(i_idx.tolist(), j_idx.tolist()))
-        for ij, (i, j) in enumerate(ij_list):
-            for kl, (k, m) in enumerate(ij_list):
-                val = eri[ij, kl]
-                eri_full[i, j, k, m] = val
-                eri_full[j, i, k, m] = val
-                eri_full[i, j, m, k] = val
-                eri_full[j, i, m, k] = val
-                eri_full[k, m, i, j] = val
-                eri_full[m, k, i, j] = val
-                eri_full[k, m, j, i] = val
-                eri_full[m, k, j, i] = val
-        return eri_full
-    raise ValueError(f"Unsupported ERI dimensionality: {eri.ndim} (expected 2 or 4)")
-
-
 class Model(ModelProto[ModelConfig]):
     """
     This class handles models built from PySCF-style integral arrays (h1e and eri).
@@ -114,43 +68,22 @@ class Model(ModelProto[ModelConfig]):
             n_spin,
         )
 
-        # -- 1-electron integrals ------------------------------------------------
+        if not 0 < n_orbit <= 16384:
+            raise ValueError("Expected 1..16384 spatial orbitals for signed int16 spin-orbital indices.")
         h1e = numpy.asarray(args.h1e, dtype=numpy.float64)
         if h1e.shape != (n_orbit, n_orbit):
             raise ValueError(f"Expected h1e shape ({n_orbit}, {n_orbit}), got {h1e.shape}")
-        energy_1: torch.Tensor = torch.as_tensor(h1e, dtype=torch.float64)
-
-        # -- 2-electron integrals ------------------------------------------------
-        eri_full = _restore_eri(numpy.asarray(args.eri, dtype=numpy.float64), n_orbit)
-        energy_2: torch.Tensor = torch.as_tensor(eri_full, dtype=torch.float64)
-
-        # Apply the same permutation used in fcidump.py to convert from
-        # chemist's (ij|kl) notation to the form expected by OpenFermion.
-        energy_2 = energy_2.permute(0, 2, 3, 1).contiguous() / 2
-
-        # -- Build spin-orbital integrals -----------------------------------------
-        energy_1_b: torch.Tensor = torch.zeros([n_orbit * 2, n_orbit * 2], dtype=torch.float64)
-        energy_2_b: torch.Tensor = torch.zeros(
-            [n_orbit * 2, n_orbit * 2, n_orbit * 2, n_orbit * 2], dtype=torch.float64
-        )
-        energy_1_b[0::2, 0::2] = energy_1
-        energy_1_b[1::2, 1::2] = energy_1
-        energy_2_b[0::2, 0::2, 0::2, 0::2] = energy_2
-        energy_2_b[0::2, 1::2, 1::2, 0::2] = energy_2
-        energy_2_b[1::2, 0::2, 0::2, 1::2] = energy_2
-        energy_2_b[1::2, 1::2, 1::2, 1::2] = energy_2
-
-        # -- Convert to FermionOperator via OpenFermion ---------------------------
-        logging.info("Converting integrals to internal Hamiltonian representation")
-        interaction_operator: openfermion.InteractionOperator = openfermion.InteractionOperator(
-            args.nuclear_repulsion, energy_1_b.numpy(), energy_2_b.numpy()
-        )  # type: ignore[no-untyped-call]
-        fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(interaction_operator)  # type: ignore[no-untyped-call]
-        openfermion_hamiltonian_dict = {
-            k: complex(v)
-            for k, v in openfermion.normal_ordered(fermion_operator).terms.items()  # type: ignore[no-untyped-call]
-        }
-        self.hamiltonian = Hamiltonian(openfermion_hamiltonian_dict, kind="fermi")
+        eri = numpy.asarray(args.eri, dtype=numpy.float64)
+        pairs = n_orbit * (n_orbit + 1) // 2
+        if eri.shape == (pairs, pairs):
+            # The historical fourfold reader fills both pair orders from the
+            # lower triangle. Preserve that convention even for asymmetric input.
+            eri = eri[numpy.tril_indices(pairs)]
+        elif eri.shape != (n_orbit,) * 4:
+            raise ValueError(f"Expected full ERIs or a ({pairs}, {pairs}) pair matrix, got {eri.shape}")
+        terms = _packed_terms((args.nuclear_repulsion, h1e, eri))
+        self.hamiltonian = Hamiltonian(terms, kind="fermi")
+        self.hamiltonian._sort_site_kind_coef()
         logging.info("Internal Hamiltonian representation successfully created")
 
         self.n_qubits: int = n_orbit * 2

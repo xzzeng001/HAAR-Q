@@ -1,5 +1,42 @@
 # HAAR-Q changelog
 
+## 0.7.1
+
+0.7.0 → 0.7.1 (PATCH). This release corrects calculations within the
+existing SCI and VMC methods and removes repeated work from their execution.
+
+- The PySCF ground-state solver exports the signed lowest Ritz state in
+  PySCF spin order and honors the standard `ecore` constant. PT2, chopping
+  and standalone natural orbitals use the same signed state when available.
+  Recompute these observables from saved Ritz states if earlier results
+  were obtained from sampling magnitudes. A legacy pool is used when the
+  checkpoint has no Ritz history. Magnitudes alone cannot recover lost phases.
+- Periodic Lanczos refreshes now reorthogonalize the residual before using
+  its norm as the next tridiagonal coupling. Earlier runs that replaced
+  this direction with a random vector could report incorrect Ritz values.
+  Independent directions still start a new block at a breakdown.
+- Orbital rotations use the current basis integrals on subsequent cycles.
+  Complex one-body densities and the ordering of saved occupations are
+  corrected. Recompute affected rotated bases from their starting integrals.
+- FCIDUMP and PySCF share restricted integral packing. Orbital jobs use the
+  same FCIDUMP parser as the molecular model. PySCF skips dense expansion
+  to spin-orbital integrals. Equal-weight ties at a selection cutoff can
+  resolve differently when the order of packed terms changes.
+- All six autoregressive MLP and Transformer unique samplers share the
+  log-domain path selector. This fixes overflow for rare configurations and
+  Transformer cache indexing for local dimensions above four. A fixed seed
+  can give a different trajectory from an older version.
+- Guide reuses the residual during sampler-only updates and handles a zero
+  residual. Both SCI fitting modes share a chunked loss evaluation and use
+  a forward pass to report final amplitudes.
+- Restarted networks load weights at the requested precision and preserve
+  the restored sampler RNG during reconstruction. The CLI stops before
+  another cycle if the saved counter already reaches the absolute limit.
+  Cycle limits and the checkpoint interval must be positive when set.
+
+Measured CPU timings and reproduction instructions are in the
+[performance notes](docs/performance.md#measured-workflows-in-071).
+
 ## 0.7.0
 
 0.6.0 → 0.7.0 (MINOR). Projected VMC gains an optional bounded-memory
