@@ -10,6 +10,7 @@ defaults:
 common:
   device: cuda
   gpu_devices: [0, 1]      # Ordinals visible inside one node allocation. The first is primary.
+  hamiltonian_term_batch_size: 0 # Set a positive number to cap each device's operator block.
   dtype: float64
   max_relative_step: 1
   random_seed: 2333

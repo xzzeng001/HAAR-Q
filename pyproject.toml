@@ -63,7 +63,10 @@ include = ["haar_q*"]
 
 [tool.setuptools.data-files]
 "share/haar-q" = ["input.yaml"]
+"share/haar-q/examples/benzene108" = ["examples/benzene108/input.yaml"]
+"share/haar-q/docs" = ["docs/large-systems.md", "docs/large-systems.zh-CN.md"]
 "share/haar-q/examples/pcluster" = ["examples/pcluster/input.yaml"]
+"share/haar-q/examples/cr2" = ["examples/cr2/*.yaml", "examples/cr2/*.FCIDUMP", "examples/cr2/prepare.py", "examples/cr2/README.md"]
 "share/haar-q/examples/h2" = ["examples/h2/H2.xyz"]
 "share/haar-q/examples/hamiltonians" = ["examples/hamiltonians/H2.FCIDUMP"]
 

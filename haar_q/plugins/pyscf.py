@@ -401,6 +401,7 @@ class Solver:
                 checkpoint_interval=rt.checkpoint_interval,
                 device=rt.device,
                 gpu_devices=rt.gpu_devices,
+                hamiltonian_term_batch_size=rt.hamiltonian_term_batch_size,
                 dtype=rt.dtype,
                 max_absolute_step=rt.max_absolute_step,
                 max_relative_step=rt.max_relative_step,

@@ -47,9 +47,13 @@ class RuntimeContext:
     max_relative_step: int | None = None
     # CUDA ordinals visible to this process. The first device owns the model and checkpoints.
     gpu_devices: tuple[int, ...] = ()
+    # Positive values partition the operator by terms and cap each device block.
+    hamiltonian_term_batch_size: int = 0
 
     def __post_init__(self) -> None:
         self._report: RunReport | None = None
+        if type(self.hamiltonian_term_batch_size) is not int or self.hamiltonian_term_batch_size < 0:
+            raise ValueError("common.hamiltonian_term_batch_size must be a nonnegative integer.")
         if type(self.checkpoint_interval) is not int or self.checkpoint_interval <= 0:
             raise ValueError("common.checkpoint_interval must be a positive integer.")
         for name in ("max_relative_step", "max_absolute_step"):
@@ -228,15 +232,30 @@ class RuntimeContext:
         return model
 
     def configure_model_devices(self, model: ModelProto) -> None:
-        """Attach the selected CUDA devices to a newly constructed native model."""
-        if len(self.gpu_devices) > 1:
+        """Select determinant partitioning or memory-bounded term partitioning for native operators."""
+        if self.hamiltonian_term_batch_size or len(self.gpu_devices) > 1:
             from ..hamiltonian import Hamiltonian
             from .parallel_hamiltonian import ParallelHamiltonian
+            from .term_hamiltonian import TermHamiltonian
 
             hamiltonian = getattr(model, "hamiltonian", None)
             if not isinstance(hamiltonian, Hamiltonian):
-                raise ValueError("Multi-GPU matvecs require a model with a native HAAR-Q Hamiltonian.")
-            if not isinstance(hamiltonian, ParallelHamiltonian):
+                raise ValueError("Hamiltonian partitioning requires a model with a native HAAR-Q Hamiltonian.")
+            if self.hamiltonian_term_batch_size:
+                if isinstance(hamiltonian, TermHamiltonian):
+                    return
+                devices = tuple(torch.device("cuda", i) for i in self.gpu_devices) or (self.device,)
+                if devices[0] == torch.device("cuda"):
+                    devices = (torch.device("cuda", torch.cuda.current_device()),)
+                operator = TermHamiltonian(hamiltonian, devices, self.hamiltonian_term_batch_size)
+                setattr(model, "hamiltonian", operator)
+                logging.info(
+                    "Partitioned %d Hamiltonian terms across %d device(s), at most %d terms per block.",
+                    len(operator.site),
+                    len(operator.devices),
+                    operator.batch_size,
+                )
+            elif not isinstance(hamiltonian, ParallelHamiltonian):
                 setattr(model, "hamiltonian", ParallelHamiltonian(hamiltonian, self.gpu_devices))
 
     def create_network(

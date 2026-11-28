@@ -10,14 +10,16 @@ import torch
 
 @torch.jit.script
 def _scaled_abs(s_abs: torch.Tensor, min_magnitude: float) -> torch.Tensor:
-    s_large = torch.log(s_abs)
+    # The inactive log branch still participates in autograd; log(0) gives
+    # a NaN derivative even when torch.where selects the linear extension.
+    s_large = torch.log(s_abs.clamp_min(min_magnitude))
     s_small = (s_abs - min_magnitude) / min_magnitude + math.log(min_magnitude)
     return torch.where(s_abs > min_magnitude, s_large, s_small)
 
 
 @torch.jit.script
 def _scaled_angle(scale: torch.Tensor, min_magnitude: float) -> torch.Tensor:
-    return 1 / (1 + min_magnitude / scale)
+    return scale / (scale + min_magnitude)
 
 
 # Loss function directory:
@@ -183,11 +185,12 @@ def sum_filtered_angle_scaled_log(s: torch.Tensor, t: torch.Tensor, min_magnitud
     Calculate the loss based on the difference between the scaled log of the current state wave function and the target wave function,
     but angle only filtered by the sum of the abs of the current state wave function and the target wave function.
     """
-    s_abs = torch.sqrt(s.real**2 + s.imag**2)
-    t_abs = torch.sqrt(t.real**2 + t.imag**2)
-
-    s_angle = torch.atan2(s.imag, s.real)
-    t_angle = torch.atan2(t.imag, t.real)
+    # torch.abs and torch.angle define zero gradients at an exact complex
+    # node, where its phase is undefined.
+    s_abs = s.abs()
+    t_abs = t.abs()
+    s_angle = s.angle()
+    t_angle = t.angle()
 
     s_magnitude = _scaled_abs(s_abs, min_magnitude)
     t_magnitude = _scaled_abs(t_abs, min_magnitude)

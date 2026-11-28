@@ -11,6 +11,7 @@ import torch
 
 from haar_q.models.fcidump import _load_integrals, _packed_terms, read_fcidump
 from haar_q.models import fcidump
+from haar_q.models._mapped_terms import map_terms, write_mapped_terms
 
 
 @pytest.mark.parametrize("scale", [1.0, EQ_TOLERANCE])
@@ -56,6 +57,43 @@ def test_direct_packing_preserves_normal_order_and_thresholds(tmp_path: Path, sc
         for sites, kinds, value in zip(site, kind, coeff)
     }
     assert packed == terms
+
+    backing = tmp_path / "mapped"
+    write_mapped_terms(backing, integrals)
+    for actual, reference in zip(map_terms(backing), (site, kind, coeff)):
+        assert torch.equal(actual, reference)
+
+
+@pytest.mark.parametrize("entry", ["", "0.25 2 1 0 0\n"])
+def test_mapped_cache_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str) -> None:
+    path = tmp_path / "FCIDUMP"
+    path.write_text("&FCI NORB=2,NELEC=2,MS2=0,\n/\n" + entry)
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(fcidump.platformdirs, "user_cache_path", lambda *args: cache)
+    args = fcidump.ModelConfig(path, cache_layout="mapped")
+    cold = fcidump.Model(args).hamiltonian
+    expected = cold.coef.clone()
+    cold.coef.zero_()
+    monkeypatch.setattr(fcidump, "write_mapped_terms", lambda *a: pytest.fail("warm run rebuilt the operator"))
+    assert torch.equal(fcidump.Model(args).hamiltonian.coef, expected)
+    (backing,) = cache.iterdir()
+    assert sum((backing / name).stat().st_size for name in ("sites", "kinds", "coefs")) == len(expected) * 28
+    with (backing / "coefs").open("ab") as stream:
+        stream.write(b"x")
+    with pytest.raises(ValueError, match="column"):
+        fcidump.Model(args)
+
+
+def test_mapped_cache_competing_publishers(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    dense = (0.5, np.ones((2, 2)), np.ones(6))
+    backing = tmp_path / "mapped"
+    with ThreadPoolExecutor(2) as executor:
+        list(executor.map(lambda _: write_mapped_terms(backing, dense), range(2)))
+    assert list(tmp_path.iterdir()) == [backing]
+    for actual, reference in zip(map_terms(backing), _packed_terms(dense)):
+        assert torch.equal(actual, reference)
 
 
 def test_cached_storage_is_private_and_preserves_v6_terms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

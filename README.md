@@ -45,6 +45,11 @@ published algorithm and is retained in scientific descriptions and citations.
 For binary Hamiltonian operations, FCIDUMP cache memory and the optional
 batched VMC backward pass, see the [performance notes](docs/performance.md).
 
+For the published benzene (30e,108o) Hamiltonian, memory-bounded operator
+partitioning, and multi-reference SCI on Cr₂, see the
+[large-system guide](docs/large-systems.md) or [中文算法说明](docs/large-systems.zh-CN.md).
+The [Cr₂ case study](examples/cr2/README.md) includes integrals for two active spaces.
+
 The [standard input](input.yaml) runs molecular VMC as supplied. Set `method`
 to choose a calculation. Each method loads its own parameters and uses the
 model, network and optimizer it needs.
@@ -205,7 +210,11 @@ python -m haar_q -i input.yaml common.device=cuda 'common.gpu_devices=[0,1]'
 | Analytical forces on supported geometry inputs | GPUs transform two-body density slabs and contract two-electron integral derivatives. PySCF constructs the RDM, derivative integrals and orbital response on the CPU |
 | Molecular preparation and ground-state Lanczos | FCIDUMP parsing and PySCF SCF/integrals use the CPU. Ground-state HAAR also uses it for older Lanczos vectors and its small tridiagonal solve |
 
-Each participating GPU must hold the Hamiltonian terms and full target determinant list.
+The table describes the default split over source determinants. Each participating GPU
+holds the Hamiltonian terms and full target determinant list in this mode.
+A positive `common.hamiltonian_term_batch_size` distributes the operator terms across GPUs
+and streams any range larger than the chosen block size. Each device then uses the same
+source and target determinants. For example, 1,000,000 terms occupy 26.7 MiB per block.
 Network replicas, temporary tensors and the primary solver workspace need additional memory.
 The matvec cost still grows with the product of the term count and the selected source count.
 Adding cards distributes work within one node. Multi-node MPI/DDP launches are unsupported.
@@ -213,7 +222,7 @@ Adding cards distributes work within one node. Multi-node MPI/DDP launches are u
 The [P-cluster input](examples/pcluster/input.yaml) is a one-cycle Transformer HAAR-SCI
 smoke calculation. For the supplied nitrogenase [8Fe–7S] integral file, `NORB=73`,
 `NELEC=114` and `MS2=0` select 57 alpha and 57 beta electrons. The determinant
-uses 19 packed bytes. Packed Hamiltonian terms alone occupy about 1.08 GiB per GPU.
+uses 19 packed bytes. A full copy of the packed Hamiltonian occupies about 1.08 GiB.
 The value of `MS2` fixes a spin projection. Assigning a total spin or identifying an
 oxidation state requires additional information. The FCIDUMP supplies energies and
 electronic integrals. Analytical nuclear forces require integral derivatives and

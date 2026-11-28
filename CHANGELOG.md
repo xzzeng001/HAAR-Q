@@ -1,5 +1,24 @@
 # HAAR-Q changelog
 
+## 0.8.0
+
+0.7.1 → 0.8.0 (MINOR). New optional operator-storage and partitioning modes
+support larger molecular Hamiltonians. Ground- and excited-state SCI gain
+explicit multi-reference initial conditions.
+
+- FCIDUMP `cache_layout: mapped` writes the spin expansion in bounded blocks
+  and maps the resulting columns. The existing sorted cache remains the default.
+- Positive `common.hamiltonian_term_batch_size` distributes term ranges and
+  streams oversized ranges. Selected-space products sum partial contributions.
+  Selection merges the globally largest weighted paths before deduplicating their destinations.
+- `options.method.haar.initial_references` adds signed molecular occupations
+  to the network samples on the first fresh SCI cycle. The default SCI fit
+  handles exact amplitude nodes. Single Krylov expansion accepts real path weights.
+- Added a [108-orbital benzene input](examples/benzene108/input.yaml), an independent
+  matrix-element check, and [two Cr₂ active-space examples](examples/cr2/README.md)
+  with PySCF preparation. See the [English](docs/large-systems.md) and
+  [Chinese](docs/large-systems.zh-CN.md) algorithm and validation notes.
+
 ## 0.7.1
 
 0.7.0 → 0.7.1 (PATCH). This release corrects calculations within the

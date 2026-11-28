@@ -1,0 +1,48 @@
+# Neutral Cr2 at 1.68 angstrom. Frozen-orbital 3d-delta CAS(4e,4o).
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 0
+  dtype: float64
+  max_relative_step: 2
+  random_seed: 2333
+  checkpoint_interval: 5
+  parent_path: null
+files:
+  fcidump: Cr2-delta.FCIDUMP
+  ref_energy: null
+symmetry: u1u1
+sampling_control:
+  seed_count: 4
+  target_basis_size: 36
+  unique_seeds: true
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+options:
+  method:
+    haar:
+      # Bonding delta-x, delta-y, antibonding delta-x, delta-y.
+      # Start with the RHF determinant and pair substitutions.
+      initial_references:
+        - {occupation: '2200', coefficient: 1.0}
+        - {occupation: '0220', coefficient: -0.2}
+        - {occupation: '2002', coefficient: -0.2}
+        - {occupation: '0022', coefficient: 0.05}
+      krylov_extend_count: 4
+      krylov_single_extend: true
+      krylov_iteration: 6
+states:
+  roots: 2
+  residual_tolerance: 1.0e-8
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/cr2-delta/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

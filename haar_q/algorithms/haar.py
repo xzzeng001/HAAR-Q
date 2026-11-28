@@ -17,6 +17,7 @@ from ..utility.action_dict import action_dict
 from ..utility.reporting import CycleResult
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
+from .references import ReferenceDeterminant, fit_anchor, pack_references
 
 
 @dataclasses.dataclass
@@ -88,12 +89,8 @@ class _DynamicLanczos:
             # Extend the configuration only once after the whole iteration.
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
                 yield package(self._eigh_tridiagonal(alpha, beta, v))
-            # Extend based on all vector in v.
-            v_sum = (
-                functools.reduce(torch.add, ((vi.conj() * vi).real.cpu() for vi in v))
-                .sqrt()
-                .to(device=self.configs.device)
-            )
+            # Rank by total Krylov weight, using the amplitude dtype expected by the Hamiltonian.
+            v_sum = functools.reduce(torch.add, ((vi.conj() * vi).real.cpu() for vi in v)).sqrt().to(self.psi)
             self._extend(v_sum)
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
                 yield package(self._eigh_tridiagonal(alpha, beta, v))
@@ -348,6 +345,8 @@ class HaarConfig:
     local_batch_count_apply_within: int = 1
     # The local batch count used to avoid memory overflow in loss function
     local_batch_count_loss_function: int = 1
+    # Supplement the neural sampler on a fresh start in the current molecular orbital basis.
+    initial_references: list[ReferenceDeterminant] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.local_step == -1:
@@ -366,6 +365,25 @@ class HaarConfig:
         """
 
         model = context.create_model(runtime_config.model)
+        references = None
+        if self.initial_references:
+            if runtime_config.model.name not in {"fcidump", "pyscf", "geometry", "optimized_basis"}:
+                raise ValueError("initial_references requires a molecular model with a declared NELEC and MS2.")
+            if not runtime_config.network.name.endswith("/u1u1"):
+                raise ValueError(
+                    "initial_references requires symmetry=u1u1 to keep all sampled states in its spin sector."
+                )
+            if "haar" not in checkpoint_data and "imag" not in checkpoint_data:
+                molecule = typing.cast(typing.Any, model)
+                references = pack_references(
+                    self.initial_references,
+                    molecule.n_qubits // 2,
+                    molecule.n_electrons,
+                    molecule.n_spins,
+                    context.device,
+                )
+            else:
+                logging.info("Continuing from the SCI checkpoint; initial_references apply only to a fresh SCI start.")
         network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
         data = checkpoint_data
 
@@ -450,6 +468,22 @@ class HaarConfig:
                 configs_from_last_iteration,
                 psi_from_last_iteration,
             )
+            explicit_start = references is not None
+            if references is not None:
+                # Give each source a unit maximum. Discarded duplicate neural rows
+                # must not dilute the supplied relative signs or reference ratios.
+                ref_configs, ref_psi = references
+                if len(original_psi):
+                    scale = original_psi.abs().amax()
+                    if not scale.isfinite():
+                        raise ValueError("The neural seed amplitudes must be finite.")
+                    if scale > 0:
+                        original_psi = original_psi / scale
+                configs, original_psi = _merge_pool_from_neural_network_and_pool_from_last_iteration(
+                    configs, original_psi, ref_configs, ref_psi
+                )
+                logging.info("Included %d explicit reference determinants in the initial SCI basis.", len(ref_configs))
+                references = None
             seeds = len(configs)
             logging.info("Sampling completed, unique configurations count: %d", seeds)
 
@@ -497,7 +531,11 @@ class HaarConfig:
                 target_prob += (p.conj() * p).real
             original_psi = target_prob.sqrt().to(dtype=torch.complex128)
 
-            max_index = original_psi.abs().argmax()
+            max_index = (
+                fit_anchor(network, configs, original_psi, self.local_batch_count_loss_function)
+                if explicit_start
+                else original_psi.abs().argmax()
+            )
             target_psi = original_psi / original_psi[max_index]
             logging.info(
                 "Local optimization target calculated, the target energy is %.10f, the sampling count is %d",

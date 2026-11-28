@@ -9,6 +9,7 @@ action:
 options:
   method:
     haar:
+      initial_references: []                             # First cycle only. Example: [{occupation: "2ab0", coefficient: 1.0}].
       network_seed_count: ${sampling_control.seed_count} # Unique configurations drawn from the network per cycle.
       previous_seed_count: ${sampling_control.seed_count} # Maximum number drawn from the previous pool, weighted by squared amplitude.
       krylov_extend_count: 2                             # Hamiltonian neighbors per expansion. Zero fixes the basis. -1 selects the library heuristic.

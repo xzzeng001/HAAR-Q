@@ -1,0 +1,45 @@
+# One selected-space cycle for the 30-electron, 108-orbital benzene Hamiltonian.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 1000000  # 26.7 MiB of operator columns per device block.
+  dtype: float64
+  max_relative_step: 1
+  parent_path: null
+  random_seed: 2333
+  checkpoint_interval: 5
+files:
+  fcidump: FCIDUMP_optSHCIorbs  # Path relative to this file, or override from the command line.
+  ref_energy: null
+symmetry: u1u1                 # 15 alpha and 15 beta electrons.
+sampling_control:
+  seed_count: 2
+  target_basis_size: 4
+  unique_seeds: true
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+options:
+  system:
+    fcidump:
+      cache_layout: mapped
+  method:
+    haar:
+      krylov_extend_count: 2
+      krylov_extend_first: true
+      krylov_iteration: 2
+      # A closed-shell trial determinant in the supplied orbital order.
+      initial_references: [{occupation: '222222222222222000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'}]
+  ansatz:
+    mlp: {hidden: [16]}
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/benzene108/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

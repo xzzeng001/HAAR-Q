@@ -9,10 +9,12 @@ import gzip
 import pathlib
 import hashlib
 import tempfile
+import sys
 import numpy as np
 import torch
 import yaml  # type: ignore[import-untyped]
 from ._integrals import _packed_terms, _term_blocks
+from ._mapped_terms import map_terms, write_mapped_terms
 import platformdirs
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
 from ..networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
@@ -32,6 +34,8 @@ class ModelConfig:
     model_path: pathlib.Path
     # The ref energy of the model, leave empty to read from FCIDUMP.yaml
     ref_energy: float | None = None
+    # "mapped" writes the spin expansion directly to disk during the first import.
+    cache_layout: str = "standard"
 
 
 def _load_integrals(
@@ -115,10 +119,21 @@ class Model(ModelProto[ModelConfig]):
         model_name = model_path.name
         ref_energy = args.ref_energy
 
+        if args.cache_layout not in {"standard", "mapped"}:
+            raise ValueError("FCIDUMP cache_layout must be 'standard' or 'mapped'.")
         with model_path.open("rb") as raw:
-            checksum = hashlib.file_digest(raw, "sha256").hexdigest() + "v6"
-        cache_file = platformdirs.user_cache_path("haar-q", "HAAR-Q") / checksum
-        if cache_file.exists():
+            checksum = hashlib.file_digest(raw, "sha256").hexdigest()
+        cache_root = platformdirs.user_cache_path("haar-q", "HAAR-Q")
+        cache_file = cache_root / (checksum + "v6")
+        if args.cache_layout == "mapped":
+            directory = cache_root / (checksum + "-mapped-v1-" + sys.byteorder)
+            (n_orbit, n_electron, n_spin), integrals = _load_integrals(model_path, headonly=directory.is_dir())
+            if integrals is not None:
+                write_mapped_terms(directory, integrals)
+                del integrals
+            self.hamiltonian = Hamiltonian(map_terms(directory), kind="fermi")
+            logging.info("Mapped %d FCIDUMP terms from %s", len(self.hamiltonian.site), directory)
+        elif cache_file.exists():
             logging.info("Loading FCIDUMP metadata from file: %s", model_path)
             (n_orbit, n_electron, n_spin), _ = read_fcidump(model_path, headonly=True)
             logging.info("FCIDUMP metadata successfully loaded")

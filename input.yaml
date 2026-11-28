@@ -10,6 +10,7 @@ defaults:
 common:
   device: cpu              # cpu, cuda or cuda:<primary visible ordinal>.
   gpu_devices: []          # Single process on one node. Use [0, 1] with device: cuda for two GPUs.
+  hamiltonian_term_batch_size: 0  # Positive: maximum packed operator terms per device block.
   dtype: float64
   max_relative_step: 2      # New outer cycles to run. Set null to use an absolute limit instead.
   max_absolute_step: null   # Stop at this total cycle number, including earlier checkpoint cycles.
@@ -53,11 +54,16 @@ forces:                            # method=forces: fixed-space nuclear forces f
 
 # Module-specific settings can coexist here. Only selected modules participate in the job.
 options:
+  system:
+    fcidump:
+      cache_layout: standard         # mapped streams the first spin expansion directly to disk.
   method:
     vmc:
       hamiltonian_guided: true       # Expand the basis and minimize its projected energy without Lanczos.
       amplitude_batch_size: 0        # 0 uses a full batch. A positive limit bounds VMC activation memory.
-    haar: {krylov_iteration: 1}        # Lanczos steps beyond the initial vector in the H2 example.
+    haar:
+      krylov_iteration: 1            # Lanczos steps beyond the initial vector in the H2 example.
+      initial_references: []         # Fresh SCI occupations in integral order, e.g. {occupation: '20', coefficient: 1}.
   ansatz:
     mlp: {hidden: [16]}                # Hidden layer widths.
 

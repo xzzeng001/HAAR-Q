@@ -1,0 +1,47 @@
+# Neutral Cr2, RHF/AVAS Cr 3d and 4s, 12 active electrons in 12 orbitals.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 0
+  dtype: float64
+  max_relative_step: 2
+  random_seed: 2333
+  checkpoint_interval: 5
+  parent_path: null
+files:
+  fcidump: Cr2-valence.FCIDUMP
+  ref_energy: null
+symmetry: u1u1
+sampling_control:
+  seed_count: 32
+  target_basis_size: 128
+  unique_seeds: true
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+states:
+  roots: 2
+  residual_tolerance: 1.0e-8
+options:
+  method:
+    haar:
+      # First six AVAS orbitals derive from occupied RHF MOs.
+      initial_references:
+        - {occupation: '222222000000', coefficient: 1.0}
+        - {occupation: '222220200000', coefficient: -0.2}
+        - {occupation: '2222abab0000', coefficient: 0.1}
+        - {occupation: '2222baba0000', coefficient: -0.1}
+      krylov_extend_count: 32
+      krylov_single_extend: true
+      krylov_iteration: 5
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/cr2-valence/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

@@ -9,3 +9,4 @@ options:
     fcidump:
       model_path: ${files.fcidump}     # FCIDUMP integrals in plain text or gzip format.
       ref_energy: ${files.ref_energy} # Reference in hartree. Null uses the adjacent FCIDUMP.yaml lookup.
+      cache_layout: standard          # mapped: stream the first spin-orbital expansion directly to disk.
