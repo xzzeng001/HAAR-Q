@@ -1,6 +1,8 @@
 """Exercise the module selectors through the installed application's input interface."""
 
 from dataclasses import fields, is_dataclass
+import gzip
+import hashlib
 from pathlib import Path
 import sys
 
@@ -8,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 import pytest
 
 from haar_q import __main__ as cli
+from haar_q.models.fcidump import read_fcidump
 from haar_q.utility.action_dict import _PARAMETER_NAMES, create_action
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "input.yaml"
@@ -21,6 +24,32 @@ def preview(
     job = OmegaConf.create(capsys.readouterr().out)
     assert isinstance(job, DictConfig)
     return job
+
+
+@pytest.mark.parametrize(
+    ("example", "sector", "sha256"),
+    [
+        ("cr2/ahlrichs", (42, 48, 0), "f3612175ff517f5f15bddbfb284ff9f6721e23924b921aeff61b578974f5bbd5"),
+        ("iron_sulfur/Fe2S2", (20, 30, 0), "95d8786af06eeea2107e19ffd98c66a6ca97fc8c9864175a4f6d64512b6f2df9"),
+        ("iron_sulfur/Fe4S4", (36, 54, 0), "0b840102a4894fee4648944f2bf3bb5d85828deb4b7e71b964136bbc4c9e01ce"),
+        ("catalysts/femoco54", (54, 54, 0), "84f3a34d61cb1552797cc2574159ec4b6efa641c380631fb4f66be654a34940e"),
+        ("catalysts/femoco57", (57, 65, 3), "c3759d0bdc71801dc54f5f6536dd8b2d5fec16c6e0e57ae3dc22e4ef7a996073"),
+        ("catalysts/ru-xviii", (56, 64, 0), "bdd81245ad09f93031e1fa7f0e7f5328b7f220b9b1c27a8688b7941837584be8"),
+    ],
+)
+def test_published_hamiltonian_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    example: str,
+    sector: tuple[int, int, int],
+    sha256: str,
+) -> None:
+    """A benchmark comparison requires the published orbital order and scalar energy offset."""
+    job = preview(monkeypatch, capsys, TEMPLATE.parent / "examples" / (example + ".yaml"))
+    path = Path(job.model.params.model_path)
+    assert read_fcidump(path, headonly=True)[0] == sector
+    with gzip.open(path, "rb") as raw:
+        assert hashlib.file_digest(raw, "sha256").hexdigest() == sha256
 
 
 @pytest.mark.parametrize(

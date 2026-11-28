@@ -1,0 +1,50 @@
+# All-electron Cr2 at 1.50 angstrom, 48 electrons in 42 Ahlrichs SV spatial orbitals.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 100000
+  dtype: float64
+  max_relative_step: 2
+  random_seed: 2333
+  checkpoint_interval: 5
+  parent_path: null
+files:
+  fcidump: Cr2-ahlrichs.FCIDUMP.gz
+  ref_energy: -2086.444586  # Extrapolated all-electron SHCI total energy (Li et al., Table I, supplement).
+symmetry: u1u1
+sampling_control:
+  seed_count: 16
+  target_basis_size: 64      # VMC target when overriding method=vmc.
+  unique_seeds: true
+training:
+  optimizer_steps: 8
+  learning_rate: 0.001
+states:
+  roots: 2
+  residual_tolerance: 1.0e-8
+options:
+  system:
+    fcidump:
+      cache_layout: mapped
+  method:
+    haar:
+      # FCIDUMP groups orbitals by irrep. The first reference fills the 24 lowest
+      # orbital energies in the file. The second promotes a pair from MO 8 to 29.
+      initial_references:
+        - {occupation: '222222220002022002200002222200000022202220', coefficient: 1.0}
+        - {occupation: '222222200002022002200002222220000022202220', coefficient: -0.2}
+      krylov_extend_count: 32
+      previous_seed_count: 128  # Retains the first 50-determinant basis on the second cycle.
+      krylov_single_extend: true
+      krylov_iteration: 16
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/cr2-ahlrichs/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

@@ -48,7 +48,22 @@ batched VMC backward pass, see the [performance notes](docs/performance.md).
 For the published benzene (30e,108o) Hamiltonian, memory-bounded operator
 partitioning, and multi-reference SCI on Cr₂, see the
 [large-system guide](docs/large-systems.md) or [中文算法说明](docs/large-systems.zh-CN.md).
-The [Cr₂ case study](examples/cr2/README.md) includes integrals for two active spaces.
+The guides tabulate the published benzene correlation energies and their equivalent
+total energies for comparison with HAAR-Q's selected-space Ritz energy.
+
+### Molecular benchmarks
+
+| System | Active electrons / spatial orbitals | What the example tests |
+| --- | --- | --- |
+| [Cr₂](examples/cr2/README.md) | 4/4, 12/12, **48/42** | Small FCI controls and a separate all-electron Ahlrichs benchmark with a published extrapolated SHCI energy |
+| [Iron–sulfur clusters](examples/iron_sulfur/README.md) | [2Fe–2S] 30/20 and [4Fe–4S] 54/36 | Ligand and metal orbitals in localized active spaces with published DMRG results |
+| [FeMoco](examples/catalysts/README.md) | **54/54** and **65/57** | Two distinct nitrogenase cofactor model structures, including an odd-electron spin sector |
+| [Ru catalyst XVIII](examples/catalysts/README.md) | **64/56** | A CO₂-to-methanol catalytic intermediate |
+| [Benzene](docs/large-systems.md#published-benzene-energies) | **30/108** | Frozen-core cc-pVDZ benchmark and comparison with published many-body methods |
+
+Each guide gives the input, integral source and energy convention. In an SCI run,
+`OSZICAR` reports the selected-space energy in `E_RITZ` and the fitted-network
+energy in `E`.
 
 The [standard input](input.yaml) runs molecular VMC as supplied. Set `method`
 to choose a calculation. Each method loads its own parameters and uses the

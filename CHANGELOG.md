@@ -1,5 +1,19 @@
 # HAAR-Q changelog
 
+## 0.8.1
+
+0.8.0 → 0.8.1 (PATCH). This release adds molecular benchmarks and published
+reference data to the existing SCI workflow.
+
+- The English and Chinese guides compare the 108-orbital benzene example to
+  the original challenge and a later CIPSI calculation, with correlation and
+  total energies on a common Hartree–Fock reference.
+- The Cr₂ examples now include the all-electron (48e,42o) Ahlrichs Hamiltonian
+  alongside the small FCI controls.
+- New molecular inputs cover [2Fe–2S], [4Fe–4S], two FeMoco model structures
+  and Ru catalytic intermediate XVIII. The case studies document the integral
+  sources, spin projections, independent checks and short-run results.
+
 ## 0.8.0
 
 0.7.1 → 0.8.0 (MINOR). New optional operator-storage and partitioning modes

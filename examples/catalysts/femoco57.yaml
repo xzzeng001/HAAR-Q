@@ -1,0 +1,48 @@
+# Published femoco57 Hamiltonian, 65 electrons in 57 spatial orbitals.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 1000000
+  dtype: float64
+  max_relative_step: 1
+  parent_path: null
+  random_seed: 2333
+  checkpoint_interval: 5
+files:
+  fcidump: femoco57.FCIDUMP.gz
+  ref_energy: null
+symmetry: u1u1  # 34 alpha and 31 beta electrons.
+sampling_control:
+  seed_count: 2
+  target_basis_size: 8
+  unique_seeds: true
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+states:
+  roots: 2
+  residual_tolerance: 1.0e-8
+options:
+  system:
+    fcidump:
+      cache_layout: mapped
+  method:
+    haar:
+      # Use the first occupied indices as a reproducible trial in this orbital ordering.
+      initial_references: [{occupation: '2222222222222222222222222222222aaa00000000000000000000000'}]
+      krylov_extend_first: true
+      krylov_extend_count: 4
+      krylov_iteration: 2
+  ansatz:
+    mlp: {hidden: [16]}
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/femoco57/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}

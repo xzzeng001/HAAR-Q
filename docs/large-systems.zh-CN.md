@@ -2,6 +2,11 @@
 
 [English guide](large-systems.md)
 
+分子算例还包括 [Cr₂ 的全电子 48e/42o 基准](../examples/cr2/README.md)、
+[双铁和四铁硫簇](../examples/iron_sulfur/README.md)，以及
+[两种 FeMoco 模型和钌催化剂中间体 XVIII](../examples/catalysts/README.md)。
+各算例说明列出了获取积分、复核运行和解读能量所需的信息。
+
 ## 用苯挑战的 108 个空间轨道检验程序
 
 苯挑战的冻结核模型含 30 个活性电子和 108 个空间轨道。本例采用作者公开的
@@ -26,6 +31,40 @@ python -m haar_q -i examples/benzene108/input.yaml
 可逐步增加 `sampling_control.seed_count`、`options.method.haar.krylov_extend_count`、
 `options.method.haar.krylov_iteration` 和外循环数，并用多个随机种子记录能量与实际
 选中维数。投影空间内的残差只衡量该空间内的求解精度，空间外遗漏的相关能需要另行评估。
+
+### 苯挑战的文献能量
+
+2020 年苯挑战的补充材料表 S2 给出了该几何下冻结核 cc-pVDZ 模型的相关能。为了能与
+HAAR-Q 在 `OSZICAR` 中的 `E_RITZ` 直接比较，下表采用作者给出的 Hartree–Fock 参考
+能量 −230.721819131 Eh，将相关能换算为总能量。换算公式为
+`E_total (Eh) = E_HF (Eh) + E_corr (mEh)/1000`。这里的总能量已包含核排斥能。
+[Eriksen 等的原始论文](https://doi.org/10.1021/acs.jpclett.0c02621) · [补充材料第 S-2 页](https://doi.org/10.1021/acs.jpclett.0c02621.s001)
+
+| 原始比较中的方法 | 文献相关能（mEh） | 换算总能量（Eh） |
+| --- | ---: | ---: |
+| ASCI | −860.0 | −231.5818 |
+| iCI | −861.1 | −231.5829 |
+| CCSDTQ | −862.4 | −231.5842 |
+| DMRG | −862.8 | −231.5846 |
+| FCCR | −863.0 | −231.5848 |
+| MBE-FCI | −863.0 | −231.5848 |
+| CAD-FCIQMC | −863.4 | −231.5852 |
+| AS-FCIQMC | −863.7 | −231.5855 |
+| SHCI | −864.2 | −231.5860 |
+
+作者估计该冻结核模型的 FCI 相关能约为 −863 mEh，即总能量约 **−231.5848 Eh**。
+这一数值仍有方法间的不确定性。表中 DMRG 和 SHCI 均含外推，CCSDTQ 是耦合簇
+对照值。如果要和有限选中空间的变分能量比较，原始 SHCI 在微扰修正与外推之前
+得到的变分相关能为 −827.2 mEh。[Eriksen 等，图 1 和表 2](https://doi.org/10.1021/acs.jpclett.0c02621)
+
+在盲测结束后，Loos、Damour 和 Scemama 用局域化轨道和 167,772,160 个行列式得到
+变分总能量 **−231.536655 Eh**。他们用四点外推得到 CIPSI 相关能 **−863.4(5) mEh**，
+折合总能量约 **−231.5852 Eh**。括号对应 0.5 mEh 的拟合不确定度，外推本身的
+系统误差需另外评估。[Loos 等，表 II 和表 III](https://doi.org/10.1063/5.0027617)
+
+HAAR-Q 的 7 行列式算例给出 **−230.7180803044 Eh**，比原挑战估计的总能量
+**高约 0.867 Eh**。在 SHCI 优化轨道中，该小空间的能量还比文献的 Hartree–Fock
+参考值高 3.74 mEh。跟踪 SCI 收敛时，可以同时记录选中维数和相应的变分能量。
 
 ## 首次读取 FCIDUMP 时怎样节省内存
 

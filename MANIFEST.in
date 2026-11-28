@@ -1,7 +1,6 @@
 include AGENTS.md CHANGELOG.md CONTRIBUTING.md input.yaml
 recursive-include haar_q/conf *.yaml
 recursive-include docs *.md
-recursive-include examples *.py *.yaml *.xyz *.FCIDUMP *.wavefunction
-include examples/cr2/README.md
+recursive-include examples *.py *.yaml *.xyz *.FCIDUMP *.FCIDUMP.gz *.wavefunction README.md LICENSE*.txt
 recursive-include tests *.py
 recursive-include benchmarks *.py

@@ -2,6 +2,11 @@
 
 [中文说明](large-systems.zh-CN.md)
 
+The molecular examples also include the [48e/42o all-electron Cr₂ benchmark](../examples/cr2/README.md),
+[two iron–sulfur clusters](../examples/iron_sulfur/README.md), and
+[FeMoco and Ru catalyst XVIII](../examples/catalysts/README.md).
+Each case study identifies the integrals, orbital space and energy convention.
+
 ## Benzene with 30 electrons in 108 spatial orbitals
 
 This example uses the published frozen-core benzene Hamiltonian in optimized
@@ -29,6 +34,45 @@ file order. The reported Ritz energy describes the selected space. Increase
 `options.method.haar.krylov_iteration` and the number of cycles for convergence
 studies. Record the selected dimension and energy across independent random seeds.
 A small residual inside a selected space does not bound its missing correlation energy.
+
+### Published benzene energies
+
+Table S2 of the 2020 challenge gives the following frozen-core cc-pVDZ correlation
+energies for this geometry. To compare with `E_RITZ` in HAAR-Q's `OSZICAR`, we
+converted them to total energies using the authors' Hartree–Fock reference of
+−230.721819131 Eh. The conversion is `E_total (Eh) = E_HF (Eh) + E_corr (mEh)/1000`.
+These totals already include nuclear repulsion. [Eriksen et al.](https://doi.org/10.1021/acs.jpclett.0c02621) · [Supporting Information, p. S-2](https://doi.org/10.1021/acs.jpclett.0c02621.s001)
+
+| Method in the original comparison | Published correlation energy (mEh) | Derived total energy (Eh) |
+| --- | ---: | ---: |
+| ASCI | −860.0 | −231.5818 |
+| iCI | −861.1 | −231.5829 |
+| CCSDTQ | −862.4 | −231.5842 |
+| DMRG | −862.8 | −231.5846 |
+| FCCR | −863.0 | −231.5848 |
+| MBE-FCI | −863.0 | −231.5848 |
+| CAD-FCIQMC | −863.4 | −231.5852 |
+| AS-FCIQMC | −863.7 | −231.5855 |
+| SHCI | −864.2 | −231.5860 |
+
+The authors place the frozen-core FCI correlation energy near −863 mEh, or
+approximately **−231.5848 Eh** total. This is an estimate. The DMRG and SHCI
+rows include extrapolation, and CCSDTQ is the coupled-cluster comparison.
+For a comparison at finite variational space size, the original SHCI
+calculation reached −827.2 mEh before perturbative correction and extrapolation.
+[Eriksen et al., Fig. 1 and Table 2](https://doi.org/10.1021/acs.jpclett.0c02621)
+
+After the blind challenge, Loos, Damour and Scemama obtained a variational
+total energy of **−231.536655 Eh** with 167,772,160 determinants in localized
+orbitals. Their four-point CIPSI extrapolation gave **−863.4(5) mEh**
+in correlation energy, or about **−231.5852 Eh** total. The parentheses denote
+a fit uncertainty of 0.5 mEh. Systematic error from the extrapolation is separate.
+[Loos et al., Tables II and III](https://doi.org/10.1063/5.0027617)
+
+The seven-determinant HAAR-Q example gives **−230.7180803044 Eh**, about
+**0.867 Eh above** the original challenge estimate. Its small space in SHCI-optimized
+orbitals even lies 3.74 mEh above the published Hartree–Fock reference.
+Use the variational energies and selected dimensions when tracking SCI convergence.
 
 ## Host memory during FCIDUMP import
 

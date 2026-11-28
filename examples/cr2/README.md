@@ -1,25 +1,41 @@
 # Chromium dimer · 铬二聚体
 
-Neutral Cr₂ at 1.68 Å provides a small multireference test before moving to metal clusters. Both supplied Hamiltonians use the same real, nonrelativistic STO-3G RHF orbitals. The FCIDUMPs include the nuclear repulsion and frozen-core offset. They can be used directly without rerunning the PySCF orbital preparation.
+The two smaller Hamiltonians describe neutral Cr₂ at 1.68 Å in the same real, nonrelativistic STO-3G RHF orbitals, including nuclear repulsion and the frozen-core offset. The 42-orbital benchmark describes the all-electron molecule at 1.50 Å in the Ahlrichs SV basis. Each input reads bundled integrals directly.
 
 | Input | Active orbitals | Electrons (α, β) | Determinants at Mₛ = 0 |
 | --- | --- | --- | ---: |
 | `input.yaml` | Two bonding and two antibonding 3d δ orbitals | 2, 2 | 36 |
 | `valence.yaml` | AVAS projection onto Cr 3d and 4s on both atoms | 6, 6 | 853,776 |
+| [ahlrichs.yaml](ahlrichs.yaml) | All 42 Ahlrichs SV spatial orbitals | 24, 24 | 125,101,653,439,058,353,102,500 |
 
 ### Running from PowerShell
 
-From the repository root, run the two selected-CI examples or the full-sector check.
+From the repository root, run a selected-CI example or the four-orbital full-sector check.
 
 ```powershell
 python -m haar_q -i examples/cr2/input.yaml
 python -m haar_q -i examples/cr2/valence.yaml
+python -m haar_q -i examples/cr2/ahlrichs.yaml
 python -m haar_q -i examples/cr2/input.yaml method=excited sampling_control.seed_count=36 options.method.haar.krylov_extend_count=0 common.max_relative_step=1
 ```
 
 In `OSZICAR`, compare the selected-space energy `E_RITZ` with FCI. The column `E` is the energy of the network fitted to that cycle. For `method=excited`, `ROOTS` lists the selected-space eigenvalues and residuals. Set `common.device=cuda:0` to use one GPU. For a single node with two visible GPUs use `common.device=cuda 'common.gpu_devices=[0,1]'`. These small calculations default to CPU.
 
-### Reference determinants and measured energies
+### The 48-electron Ahlrichs SV benchmark · 48 电子全电子基准
+
+The 42-orbital input keeps all 48 electrons, including the Cr cores. Spatial orbitals are grouped by symmetry in the FCIDUMP. One trial doubly occupies the 24 orbitals with the lowest listed orbital energies. The other promotes the electron pair from orbital 8 to 29 (one-based indices). The scalar nuclear repulsion is 203.204048098560 Eh. PySCF spatial integrals and the closed-shell Slater–Condon rules give −2085.572970789280 Eh and −2085.372934476197 Eh for the diagonals and +0.033658232725 Eh for the pair coupling. The HAAR-Q projected matrix agreed to within 4.6×10⁻¹³ Eh.
+
+At seed 2333, 16 neural samples and two explicit references gave 50 determinants with `E_RITZ` = −2085.5784822877 Eh after one cycle, then 98 with −2085.5786055339 Eh after two. Li et al. reported **−2086.444586(10) Eh** from a weighted quartic extrapolation of semistochastic heat-bath CI (SHCI) for this same basis, geometry and all-electron space. The two-cycle energy is 0.8660 Eh above that estimate. This short run checks execution at scale. Use larger selected spaces and check energy convergence across seeds before comparing solver accuracy. The `ref_energy` field records the literature estimate in hartree. [Li et al., supplemental Table I, all-electron block](https://journals.aps.org/prresearch/supplemental/10.1103/PhysRevResearch.2.012015/paper2_supp2.pdf)
+
+42 轨道输入采用 1.50 Å 键长、Ahlrichs SV 基组及全部 48 个电子。FCIDUMP 中轨道按对称性分组。第一个参考行列式双占据文件中轨道能量最低的 24 个轨道，第二个将一对电子从第 8 轨道移到第 29 轨道。用原始空间轨道积分独立计算的两个对角元及耦合与 HAAR-Q 的最大偏差低于 4.6×10⁻¹³ Eh。
+
+随机种子 2333 下，16 个网络样本与两个参考态经首轮扩展得到 50 个行列式，第二轮得到 98 个，Ritz 能量为 −2085.5786055339 Eh。与同一模型的文献 SHCI 外推总能量 −2086.444586(10) Eh 相比，仍高约 0.8660 Eh。此例用于检查程序能否处理这一轨道空间。要判断相关能收敛，需扩大选中空间，比较多个随机种子。原有的 4 和 12 轨道例子使用不同的键长、基组及冻结核处理，三者能量不构成同一哈密顿量下的收敛序列。[Li 等，补充材料表 I](https://journals.aps.org/prresearch/supplemental/10.1103/PhysRevResearch.2.012015/paper2_supp2.pdf)
+
+**Integral attribution · 积分来源**
+
+`Cr2-ahlrichs.FCIDUMP.gz` retains the bytes of `ya_Cr2_ahlrichs_vdz_48_84.FCIDUMP.gz` in USTC-KnowledgeComputingLab's `qmb-models` dataset (GPL-3.0), revision `ab1a7002ccbaca0ac43acafaf0f40400d14c3940`. The compressed SHA-256 is `9e06293c1c9d6d4a87154f1ae96a59c2881462540ba89dad2b5efd648a5513fe`. [Dataset and license](https://huggingface.co/datasets/USTC-KnowledgeComputingLab/qmb-models/tree/ab1a7002ccbaca0ac43acafaf0f40400d14c3940) · [Original archived integrals](https://huggingface.co/datasets/USTC-KnowledgeComputingLab/qmb-models/resolve/ab1a7002ccbaca0ac43acafaf0f40400d14c3940/ya_Cr2_ahlrichs_vdz_48_84.FCIDUMP.gz)
+
+### Four- and twelve-orbital reference determinants and measured energies
 
 The δ orbital order is E2gx, E2gy, E2ux, E2uy. The valence orbitals use the order written by the AVAS generator. Each character in a reference string refers to one spatial orbital in FCIDUMP order. The characters `0`, `a`, `b`, and `2` denote empty, α, β, and double occupancy. The signed starting coefficients in the YAML are trial guesses. In the first cycle, HAAR-Q combines these determinants with neural samples, merges duplicates, and expands the basis through Hamiltonian couplings. Revisit the guesses and orbital phases when supplying integrals in a different orbital basis.
 
@@ -40,7 +56,7 @@ python -m haar_q -i examples/cr2/input.yaml 'options.method.haar.initial_referen
 
 The valence example used 32 neural samples and four explicit references. The second cycle reached −2064.0718487256 Eh with 89 selected determinants. With 36 neural samples and the same seed 2333, the second cycle reached −2064.1450176761 Eh with 104 determinants. Here the neural-only run gave a lower energy at the cost of a larger basis. Independent PySCF FCI gives −2064.382695372985 Eh in this Mₛ = 0 sector. The two short runs therefore miss 310.847 and 237.678 mEh, respectively. The FCI root has ⟨S²⟩ = 2 (triplet) in this STO-3G active-space model. A generic Davidson starting vector reaches this root across spin and spatial symmetries. A binding curve or dissociation energy would also require consistent atomic or dissociation-limit calculations, a larger orbital basis and additional correlation. The Cr₂ benchmark study and the AVAS paper describe the physical problem and the orbital construction. [Larsson et al., JACS (2022)](https://doi.org/10.1021/jacs.2c06357) · [Sayfutyarova et al., JCTC (2017)](https://doi.org/10.1021/acs.jctc.7b00128)
 
-### Regenerating the Hamiltonians
+### Regenerating the two STO-3G Hamiltonians
 
 With PySCF installed, write fresh copies to the current directory. The first command always runs an independent FCI check. Adding `--fci` to the second command requests a larger Davidson calculation. Different BLAS builds and thread counts can choose a different ordering within degenerate AVAS orbital pairs. Use the supplied FCIDUMPs to reproduce the determinant-level comparison above.
 
@@ -49,7 +65,7 @@ python examples/cr2/prepare.py --space delta --output Cr2-delta.FCIDUMP
 python examples/cr2/prepare.py --space valence --threads 2 --output Cr2-valence.FCIDUMP
 ```
 
-### 中文说明
+### 四轨道与十二轨道 STO-3G 算例
 
 两个算例采用中性 Cr₂，核间距为 1.68 Å。脚本先做 STO-3G 基组的非相对论 RHF 计算，再固定轨道构造小空间哈密顿量，能量已包含核排斥与冻结电子的贡献。上表第一行只保留两对成键与反键 δ 轨道，用于逐行列式核验。第二行通过 AVAS 投影选出两个 Cr 原子的 3d 和 4s 轨道，在固定的自旋投影下共有 853,776 个行列式。仓库已附两份积分文件，可直接在 PowerShell 运行前述命令。
 

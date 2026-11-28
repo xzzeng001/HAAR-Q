@@ -1,0 +1,49 @@
+# One selected-CI cycle in the Li and Chan Fe2S2 restricted active space.
+defaults:
+  - method: haar
+  - system: fcidump
+  - ansatz: mlp
+  - optim: adam
+  - _self_
+
+common:
+  device: cpu
+  gpu_devices: []
+  hamiltonian_term_batch_size: 250000
+  dtype: float64
+  max_relative_step: 1
+  parent_path: null
+  random_seed: 2333
+  checkpoint_interval: 5
+files:
+  fcidump: Fe2S2_30_40.FCIDUMP.gz
+  ref_energy: -116.6056091  # Authors' singlet active-space DMRG, D=8000.
+symmetry: u1u1
+sampling_control:
+  seed_count: 6
+  unique_seeds: true
+  target_basis_size: 32    # Applies if switching to VMC.
+training:
+  optimizer_steps: 1
+  learning_rate: 0.001
+states:
+  roots: 2
+  residual_tolerance: 1.0e-8
+options:
+  method:
+    haar:
+      # Opposite local spin patterns in the published spatial orbital order.
+      initial_references:
+        - {occupation: '2aaaaa222222bbbbb222', coefficient: 1.0}
+        - {occupation: '2bbbbb222222aaaaa222', coefficient: -1.0}
+      krylov_extend_first: true
+      krylov_extend_count: 8
+      krylov_iteration: 4
+  system:
+    fcidump: {cache_layout: mapped}
+  ansatz:
+    mlp: {hidden: [16]}
+hydra:
+  searchpath: [pkg://haar_q.conf]
+  run:
+    dir: outputs/Fe2S2/${action.name}/${now:%Y-%m-%d_%H-%M-%S-%f}
